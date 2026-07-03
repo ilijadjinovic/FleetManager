@@ -1,0 +1,151 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── HELPER FUNKCIJE ──────────────────────────────────────
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isMasterAdmin() {
+      return isAuth() && getUserData().role == 'master_admin';
+    }
+
+    function isFleetAdmin(companyId) {
+      return isAuth()
+        && getUserData().role == 'fleet_admin'
+        && getUserData().companyId == companyId;
+    }
+
+    function isDriver(companyId) {
+      return isAuth()
+        && getUserData().role == 'driver'
+        && getUserData().companyId == companyId;
+    }
+
+    function isCompanyMember(companyId) {
+      return isFleetAdmin(companyId) || isDriver(companyId) || isMasterAdmin();
+    }
+
+    // ── KORISNICI ────────────────────────────────────────────
+    match /users/{userId} {
+      allow read: if isAuth() && (request.auth.uid == userId || isMasterAdmin()
+        || (getUserData().role == 'fleet_admin'
+            && resource.data.companyId == getUserData().companyId));
+      allow create: if isMasterAdmin()
+        // Fleet admin kreira lokalne vozačke naloge
+        || (isAuth() && getUserData().role == 'fleet_admin')
+        // Novi korisnik kreira sopstveni profil pri registraciji
+        || (isAuth() && request.auth.uid == userId);
+      allow update: if isAuth() && (
+        request.auth.uid == userId
+        || isMasterAdmin()
+        || (getUserData().role == 'fleet_admin'
+            && resource.data.companyId == getUserData().companyId
+            && resource.data.role == 'driver')
+      );
+      allow delete: if isMasterAdmin()
+        || (isAuth() && getUserData().role == 'fleet_admin'
+            && resource.data.companyId == getUserData().companyId
+            && resource.data.role == 'driver');
+    }
+
+    // ── KOMPANIJE ────────────────────────────────────────────
+    match /companies/{companyId} {
+      allow read: if isCompanyMember(companyId);
+      // Fleet admin može kreirati firmu (self-registration)
+      allow create: if isAuth();
+      allow update: if isMasterAdmin() || isFleetAdmin(companyId);
+      allow delete: if isMasterAdmin();
+
+      // ── VOZILA ────────────────────────────────────────────
+      match /vehicles/{vehicleId} {
+        allow read: if isCompanyMember(companyId);
+        allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
+        // Vozač može da update-uje currentKm (pri točenju)
+        allow update: if isDriver(companyId)
+          && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['currentKm', 'updatedAt']);
+      }
+
+      // ── VOZAČI ────────────────────────────────────────────
+      match /drivers/{driverId} {
+        allow read: if isCompanyMember(companyId);
+        allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
+      }
+
+      // ── ZADUŽENJA ─────────────────────────────────────────
+      match /assignments/{assignmentId} {
+        allow read: if isCompanyMember(companyId);
+        allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
+        // Vozač može da zatvori svoje zaduženje i update-uje km
+        allow update: if isDriver(companyId)
+          && resource.data.driverUid == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['status', 'endDate', 'endKm', 'kmMismatch',
+                        'driverStartKm', 'unassignNotes', 'closedByDriver', 'updatedAt']);
+      }
+
+      // ── TRIP ENTRIES (gorivo, putarine, prijave) ──────────
+      match /tripEntries/{entryId} {
+        allow read: if isCompanyMember(companyId);
+        allow create: if isCompanyMember(companyId);
+        // Vozač može brisati/menjati samo svoje unose
+        allow update, delete: if isMasterAdmin() || isFleetAdmin(companyId)
+          || (isDriver(companyId) && resource.data.driverUid == request.auth.uid);
+      }
+
+      // ── INCIDENTI ─────────────────────────────────────────
+      match /incidents/{incidentId} {
+        allow read: if isCompanyMember(companyId);
+        allow create: if isCompanyMember(companyId);
+        // Status menja samo admin
+        allow update: if isMasterAdmin() || isFleetAdmin(companyId)
+          || (isDriver(companyId)
+              && resource.data.driverUid == request.auth.uid
+              && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status']));
+        allow delete: if isMasterAdmin() || isFleetAdmin(companyId);
+      }
+
+      // ── SERVISI ───────────────────────────────────────────
+      match /services/{serviceId} {
+        allow read: if isCompanyMember(companyId);
+        allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
+      }
+
+      // ── SERVISERI (kontakti servisa sa kojima sarađuje firma) ──
+      match /serviceProviders/{providerId} {
+        allow read: if isCompanyMember(companyId);
+        allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
+      }
+
+      // ── ZAKAZANI SERVISI ────────────────────────────────────
+      match /scheduledServices/{scheduleId} {
+        allow read: if isCompanyMember(companyId);
+        allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
+      }
+
+      // ── NOTIFIKACIJE ──────────────────────────────────────
+      match /notifications/{notifId} {
+        allow read: if isCompanyMember(companyId);
+        allow create: if isCompanyMember(companyId);
+        allow update: if isAuth()
+          && (isMasterAdmin() || isFleetAdmin(companyId)
+              || resource.data.recipientUid == request.auth.uid);
+        allow delete: if isMasterAdmin() || isFleetAdmin(companyId);
+      }
+    }
+
+    // ── ADMIN NOTIFIKACIJE (pending zahtevi) ──────────────────
+    match /adminNotifications/{notifId} {
+      allow read: if isAuth() && isMasterAdmin();
+      allow create: if isAuth();
+      allow update: if isAuth() && isMasterAdmin();
+      allow delete: if isAuth() && isMasterAdmin();
+    }
+  }
+}

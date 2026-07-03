@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="sr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#1a2744" />
+  <title>Fleet Manager</title>
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="stylesheet" href="./style.css" />
+  <link rel="icon" href="./assets/icon-192.png" />
+</head>
+<body>
+
+  <!-- LOGIN EKRAN -->
+  <div id="login-screen" class="login-screen">
+    <!-- Renderuje login.js -->
+  </div>
+
+  <!-- GLAVNA APP -->
+  <div id="app" class="app hidden">
+
+    <!-- HEADER -->
+    <header class="app-header">
+      <div class="app-header__left">
+        <img class="app-header__logo-img" src="./assets/icon-192.png" alt="Fleet Manager" />
+        <span class="app-header__name">Fleet Manager</span>
+      </div>
+    </header>
+
+    <!-- SADRŽAJ -->
+    <main id="content" class="content">
+      <!-- Renderuje aktivni tab -->
+    </main>
+
+    <!-- NAVIGACIJA (bottom tabs) -->
+    <nav id="main-nav" class="main-nav">
+      <!-- Renderuje app.js buildNav() -->
+    </nav>
+
+  </div>
+
+  <!-- MODAL -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal__header">
+        <h3 id="modal-title" class="modal__title"></h3>
+        <button id="modal-close" class="modal__close">✕</button>
+      </div>
+      <div id="modal-body" class="modal__body"></div>
+      <div class="modal__footer">
+        <button id="modal-cancel" class="btn btn--secondary" data-i18n="cancel">Otkaži</button>
+        <button id="modal-confirm" class="btn btn--primary" data-i18n="confirm">Potvrdi</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import "./app.js"; // pokreće init()
+
+    // Modal close
+    document.getElementById("modal-close")?.addEventListener("click", () => {
+      document.getElementById("modal-overlay").classList.add("hidden");
+    });
+    document.getElementById("modal-overlay")?.addEventListener("click", (e) => {
+      if (e.target === e.currentTarget) {
+        e.currentTarget.classList.add("hidden");
+      }
+    });
+  </script>
+</body>
+</html>
