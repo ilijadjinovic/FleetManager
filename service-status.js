@@ -37,3 +37,29 @@ export function isServiceToday(s) {
   d.setHours(0, 0, 0, 0);
   return d.getTime() === today.getTime();
 }
+
+/**
+ * "Zakasnio" servis: bio je zakazan (status "planned"), a datum je već
+ * prošao, a niko nije potvrdio da je vozilo odvezeno u servis. Dugme
+ * "Vozilo odvezeno" ostaje dostupno i dalje — ovo je samo vizuelna
+ * oznaka da zapisu treba pažnja.
+ */
+export function isServiceOverdue(s) {
+  if (effectiveServiceStatus(s) !== SERVICE_STATUS.PLANNED) return false;
+  const d = s.serviceDate?.toDate ? s.serviceDate.toDate() : new Date(s.serviceDate);
+  if (isNaN(d)) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime() < today.getTime();
+}
+
+/** Broj dana od zakazanog datuma do danas (pozitivan broj, samo za overdue zapise). */
+export function overdueDays(s) {
+  const d = s.serviceDate?.toDate ? s.serviceDate.toDate() : new Date(s.serviceDate);
+  if (isNaN(d)) return 0;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  d.setHours(0, 0, 0, 0);
+  return Math.max(0, Math.round((today.getTime() - d.getTime()) / (1000 * 60 * 60 * 24)));
+}
