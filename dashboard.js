@@ -11,6 +11,8 @@ import { t, getCurrentLang } from "./i18n.js";
 import { S, setActiveCompany, navigateTo } from "./app.js";
 import { getCompanies } from "./firebase.js";
 import { isVehicleRegistered, openVehicleDetail } from "./vehicles.js";
+import { mountPendingBanner } from "./pending-requests.js";
+import { effectiveServiceStatus, isServiceToday, SERVICE_STATUS } from "./service-status.js";
 
 export async function renderDashboard(container) {
   const isMasterAdmin = S.profile?.role === "master_admin";
@@ -41,6 +43,7 @@ export async function renderDashboard(container) {
       <h2 class="page-title" data-i18n="tab_dashboard">${t("tab_dashboard")}</h2>
       ${companySwitcherHTML}
     </div>
+    ${isMasterAdmin ? `<div id="pending-banner-section"></div>` : ""}
     <div id="dashboard-content">
       <div class="loading">${t("loading")}</div>
     </div>
@@ -51,6 +54,9 @@ export async function renderDashboard(container) {
     document.getElementById("company-select")?.addEventListener("change", (e) => {
       setActiveCompany(e.target.value || null);
     });
+    // Baner "Zahtevi za pristup" — nezavisan od izabrane firme,
+    // pending zahtevi mogu biti za bilo koju firmu.
+    mountPendingBanner(document.getElementById("pending-banner-section"), { compact: true });
   }
 
   if (!S.companyId) {
@@ -142,15 +148,20 @@ async function loadDashboardData() {
       )
     ).catch(() => ({ docs: [] }));
 
-    const upcomingScheduled = servicesSnap.docs.map(d => {
-      const s = { id: d.id, ...d.data() };
-      const veh = vehicles.find(v => v.id === s.vehicleId);
-      return {
-        ...s,
-        vehicleBrand: veh?.brand || "",
-        vehicleModel: veh?.model || "",
-      };
-    });
+    const upcomingScheduled = servicesSnap.docs
+      .map(d => {
+        const s = { id: d.id, ...d.data() };
+        const veh = vehicles.find(v => v.id === s.vehicleId);
+        return {
+          ...s,
+          vehicleBrand: veh?.brand || "",
+          vehicleModel: veh?.model || "",
+        };
+      })
+      // Servisi koji su u međuvremenu završeni (status "done") ne treba
+      // više da se prikazuju kao "nadolazeći" — čak i ako im je datum
+      // danas/u opsegu narednih 30 dana.
+      .filter(s => effectiveServiceStatus(s) !== SERVICE_STATUS.DONE);
 
     const isDriver = role === "driver";
 
@@ -237,8 +248,12 @@ function renderAdminDashboard({ total, active, inService, unregistered, broken, 
           : upcomingScheduled.map(s => {
               const d = s.serviceDate?.toDate ? s.serviceDate.toDate() : new Date(s.serviceDate);
               const daysLeft = Math.ceil((d - today) / (1000 * 60 * 60 * 24));
-              const urgency = daysLeft <= 2 ? "urgent" : daysLeft <= 7 ? "warning" : "ok";
+              const today_ = isServiceToday(s);
+              const urgency = today_ ? "today" : daysLeft <= 2 ? "urgent" : daysLeft <= 7 ? "warning" : "ok";
               const dateStr = formatDate(d);
+              const status = effectiveServiceStatus(s);
+              const inProgressBadge = status === SERVICE_STATUS.IN_PROGRESS
+                ? `<span class="today-badge" style="background:var(--color-warning)">${t("service_status_in_progress")}</span>` : "";
               return `
                 <div class="upcoming-item upcoming-item--${urgency}" data-vehicle-id="${s.vehicleId}" style="cursor:pointer">
                   <div class="upcoming-item__main">
@@ -247,8 +262,12 @@ function renderAdminDashboard({ total, active, inService, unregistered, broken, 
                     ${s.workshop ? `<span class="upcoming-item__plate">🔧 ${s.workshop}</span>` : ""}
                   </div>
                   <div class="upcoming-item__right">
-                    <span class="upcoming-item__date">${dateStr}</span>
-                    <span class="upcoming-item__days">${daysLeft} ${t("dashboard_days_left")}</span>
+                    <span class="upcoming-item__date">
+                      ${dateStr}
+                      ${today_ ? `<span class="today-badge">${t("dashboard_today")}</span>` : ""}
+                      ${inProgressBadge}
+                    </span>
+                    <span class="upcoming-item__days">${daysLeft <= 0 ? "" : daysLeft + " " + t("dashboard_days_left")}</span>
                   </div>
                 </div>
               `;

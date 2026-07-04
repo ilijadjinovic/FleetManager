@@ -11,7 +11,9 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { t, getCurrentLang } from "./i18n.js";
 import { S, showToast, openModal, closeModal } from "./app.js";
+import { openScheduleForm, getScheduledServices, cancelScheduledService } from "./schedule.js";
 import { getServiceProviders } from "./servicers.js";
+import { effectiveServiceStatus, isServiceToday, SERVICE_STATUS } from "./service-status.js";
 
 // ── PREDEFINISANE BOJE VOZILA ────────────────────────────────
 const VEHICLE_COLORS = [
@@ -208,33 +210,13 @@ function vehicleCard(v) {
 }
 
 // ── DETAIL POGLED ─────────────────────────────────────────────
-// initialTab — omogućava da se skoči direktno na neki tab (npr. sa dashboarda na "service")
-export async function openVehicleDetail(vehicleId, initialTab = "tech") {
+async function openVehicleDetail(vehicleId) {
   currentVehicleId = vehicleId;
-  let vehicle = allVehicles.find(v => v.id === vehicleId);
-
-  // Ako vozilo nije u kešu (npr. ulazak direktno sa dashboarda, bez prethodne posete
-  // tabu "Vozila"), dohvati ga direktno iz Firestore-a.
-  if (!vehicle) {
-    try {
-      const snap = await getDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId));
-      if (!snap.exists()) return;
-      vehicle = { id: snap.id, ...snap.data() };
-      allVehicles.push(vehicle);
-    } catch {
-      return;
-    }
-  }
+  const vehicle = allVehicles.find(v => v.id === vehicleId);
+  if (!vehicle) return;
 
   const canEdit = S.profile?.role === "master_admin" || S.profile?.role === "fleet_admin";
   const container = document.getElementById("content");
-
-  const TABS = [
-    { key: "tech",        label: t("vehicle_tab_tech") },
-    { key: "finance",     label: t("vehicle_tab_finance") },
-    { key: "service",     label: t("vehicle_tab_service") },
-    { key: "assignments", label: t("vehicle_tab_assignments") },
-  ];
 
   container.innerHTML = `
     <div class="detail-header">
@@ -252,9 +234,10 @@ export async function openVehicleDetail(vehicleId, initialTab = "tech") {
     </div>
 
     <div class="tab-strip" id="vehicle-tabs">
-      ${TABS.map(tb => `
-        <button class="tab-strip__btn ${tb.key === initialTab ? "tab-strip__btn--active" : ""}" data-vtab="${tb.key}">${tb.label}</button>
-      `).join("")}
+      <button class="tab-strip__btn tab-strip__btn--active" data-vtab="tech">${t("vehicle_tab_tech")}</button>
+      <button class="tab-strip__btn" data-vtab="finance">${t("vehicle_tab_finance")}</button>
+      <button class="tab-strip__btn" data-vtab="service">${t("vehicle_tab_service")}</button>
+      <button class="tab-strip__btn" data-vtab="assignments">${t("vehicle_tab_assignments")}</button>
     </div>
 
     <div id="vehicle-tab-content"></div>
@@ -274,9 +257,8 @@ export async function openVehicleDetail(vehicleId, initialTab = "tech") {
     renderVehicleTab(btn.dataset.vtab, vehicle);
   });
 
-  renderVehicleTab(initialTab, vehicle);
+  renderVehicleTab("tech", vehicle);
 }
-
 
 // ── VEHICLE TABOVI ────────────────────────────────────────────
 function renderVehicleTab(tab, vehicle) {
@@ -287,6 +269,7 @@ function renderVehicleTab(tab, vehicle) {
     case "tech":     content.innerHTML = renderTechTab(vehicle); break;
     case "finance":  content.innerHTML = renderFinanceTab(vehicle); break;
     case "service":    loadServiceTab(content, vehicle); break;
+    case "scheduled":  loadScheduledTab(content, vehicle); break;
     case "assignments": loadAssignmentsTab(content, vehicle); break;
   }
 }
@@ -343,12 +326,34 @@ async function loadServiceTab(container, vehicle) {
       ${canEdit ? `<div style="margin-bottom:12px"><button class="btn btn--primary btn--sm" id="btn-add-service">+ ${t("service_add")}</button></div>` : ""}
       ${services.length === 0
         ? `<div class="empty-state"><div class="empty-state__icon">🔧</div><p>${t("no_data")}</p></div>`
-        : `<div class="service-list">${services.map(s => serviceItem(s)).join("")}</div>`
+        : `<div class="service-list">${services.map(s => serviceItem(s, vehicle, canEdit)).join("")}</div>`
       }
     `;
 
     if (canEdit) {
       document.getElementById("btn-add-service")?.addEventListener("click", () => openServiceForm(vehicle));
+
+      container.querySelectorAll(".btn-edit-service").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const s = services.find(x => x.id === btn.dataset.id);
+          if (s) openServiceForm(vehicle, s);
+        });
+      });
+      container.querySelectorAll(".btn-delete-service").forEach(btn => {
+        btn.addEventListener("click", () => confirmDeleteService(vehicle, btn.dataset.id));
+      });
+      container.querySelectorAll(".btn-service-taken").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const s = services.find(x => x.id === btn.dataset.id);
+          if (s) markServiceTaken(vehicle, s);
+        });
+      });
+      container.querySelectorAll(".btn-service-complete").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const s = services.find(x => x.id === btn.dataset.id);
+          if (s) openCompleteServiceModal(vehicle, s);
+        });
+      });
     }
   } catch (e) {
     container.innerHTML = `<div class="error-state">${t("error")}: ${e.message}</div>`;
@@ -676,8 +681,10 @@ function confirmDeleteVehicle(vehicle) {
     .catch(e => showToast(`${t("error")}: ${e.message}`, "error"));
 }
 
-// ── SERVIS FORMA ──────────────────────────────────────────────
-async function openServiceForm(vehicle) {
+// ── SERVIS FORMA (dodavanje / editovanje) ────────────────────
+async function openServiceForm(vehicle, service = null) {
+  const isEdit = !!service;
+  const s = service || {};
   const servicers = await getServiceProviders();
 
   const bodyHTML = `
@@ -686,51 +693,54 @@ async function openServiceForm(vehicle) {
         <label class="form-label">${t("service_type")} *</label>
         <select id="sf-type" class="form-select">
           ${["regular","tech","tires","repair","other"].map(st =>
-            `<option value="${st}">${t("service_type_" + st)}</option>`
+            `<option value="${st}" ${s.serviceType === st ? "selected" : ""}>${t("service_type_" + st)}</option>`
           ).join("")}
         </select>
       </div>
       <div class="form-group">
         <label class="form-label">${t("service_date")} *</label>
-        <input id="sf-date" class="form-input" type="date" value="${new Date().toISOString().split("T")[0]}" />
+        <input id="sf-date" class="form-input" type="date"
+          value="${isEdit ? toDateInput(s.serviceDate) : new Date().toISOString().split("T")[0]}" />
       </div>
     </div>
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">${t("service_km")}</label>
-        <input id="sf-km" class="form-input" type="number" value="${vehicle.currentKm || ""}" />
+        <input id="sf-km" class="form-input" type="number" value="${isEdit ? (s.km ?? "") : (vehicle.currentKm || "")}" />
       </div>
       <div class="form-group">
         <label class="form-label">${t("service_cost")}</label>
-        <input id="sf-cost" class="form-input" type="number" />
+        <input id="sf-cost" class="form-input" type="number" value="${s.cost ?? ""}" />
       </div>
     </div>
     <div class="form-group">
       <label class="form-label">${t("service_workshop")}</label>
       <select id="sf-workshop-select" class="form-select">
         <option value="">${t("service_workshop_select_ph")}</option>
-        ${servicers.map(sp => `<option value="${sp.id}">${sp.name}</option>`).join("")}
-        <option value="__other__">${t("service_workshop_other")}</option>
+        ${servicers.map(sp => `<option value="${sp.id}" ${s.servicerId === sp.id ? "selected" : ""}>${sp.name}</option>`).join("")}
+        <option value="__other__" ${!s.servicerId && s.workshop ? "selected" : ""}>${t("service_workshop_other")}</option>
       </select>
-      <input id="sf-workshop" class="form-input" type="text" style="margin-top:8px;display:none" placeholder="${t("service_workshop")}" />
+      <input id="sf-workshop" class="form-input" type="text" style="margin-top:8px;display:${!s.servicerId && s.workshop ? "" : "none"}"
+        placeholder="${t("service_workshop")}" value="${!s.servicerId && s.workshop ? s.workshop : ""}" />
     </div>
     <div class="form-group">
       <label class="form-label">${t("service_description")}</label>
-      <textarea id="sf-desc" class="form-textarea"></textarea>
+      <textarea id="sf-desc" class="form-textarea">${s.description || ""}</textarea>
     </div>
+    <div class="form-section-title" style="margin-top:4px">${t("service_completion_section")}</div>
     <div class="form-row">
       <div class="form-group">
-        <label class="form-label">${t("service_next_date")}</label>
-        <input id="sf-nextDate" class="form-input" type="date" />
+        <label class="form-label">${t("service_end_date")}</label>
+        <input id="sf-endDate" class="form-input" type="date" value="${toDateInput(s.endDate)}" />
       </div>
       <div class="form-group">
-        <label class="form-label">${t("service_next_km")}</label>
-        <input id="sf-nextKm" class="form-input" type="number" />
+        <label class="form-label">${t("service_end_km")}</label>
+        <input id="sf-endKm" class="form-input" type="number" value="${s.endKm ?? ""}" />
       </div>
     </div>
   `;
 
-  openModal(t("service_add"), bodyHTML, async () => {
+  openModal(isEdit ? `${t("edit")}: ${t("service_type_" + s.serviceType) || s.serviceType}` : t("service_add"), bodyHTML, async () => {
     const dateVal = document.getElementById("sf-date")?.value;
     if (!dateVal) return;
     try {
@@ -745,23 +755,38 @@ async function openServiceForm(vehicle) {
         servicerId = selectedId;
       }
 
-      await addDoc(collection(db, "companies", S.companyId, "services"), {
-        vehicleId:   vehicle.id,
+      const data = {
+        vehicleId:    vehicle.id,
         vehiclePlate: vehicle.plate,
-        serviceType: document.getElementById("sf-type")?.value,
-        serviceDate: new Date(dateVal),
-        km:          numOrNull("sf-km"),
-        cost:        numOrNull("sf-cost"),
+        serviceType:  document.getElementById("sf-type")?.value,
+        serviceDate:  new Date(dateVal),
+        km:           numOrNull("sf-km"),
+        cost:         numOrNull("sf-cost"),
         workshop,
         servicerId,
-        description: document.getElementById("sf-desc")?.value.trim() || null,
-        nextDate:    dateOrNull("sf-nextDate"),
-        nextKm:      numOrNull("sf-nextKm"),
-        createdBy:   S.user.uid,
-        createdAt:   serverTimestamp(),
-      });
+        description:  document.getElementById("sf-desc")?.value.trim() || null,
+        endDate:      dateOrNull("sf-endDate"),
+        endKm:        numOrNull("sf-endKm"),
+      };
+
+      if (isEdit) {
+        await updateDoc(doc(db, "companies", S.companyId, "services", service.id), {
+          ...data, updatedAt: serverTimestamp(),
+        });
+      } else {
+        // Novi zapis: ako je datum u budućnosti → "planned" (čeka potvrdu
+        // da je vozilo odvezeno). Ako je danas/u prošlosti → "done" odmah,
+        // isto kao i ranije (direktno logovanje već odrađenog servisa).
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        const chosen = new Date(dateVal); chosen.setHours(0, 0, 0, 0);
+        data.status = chosen.getTime() > today.getTime() ? SERVICE_STATUS.PLANNED : SERVICE_STATUS.DONE;
+
+        await addDoc(collection(db, "companies", S.companyId, "services"), {
+          ...data, createdBy: S.user.uid, createdAt: serverTimestamp(),
+        });
+      }
+
       showToast(t("success"), "success");
-      // reload service tab
       const content = document.getElementById("vehicle-tab-content");
       if (content) loadServiceTab(content, vehicle);
     } catch (e) {
@@ -783,6 +808,92 @@ async function openServiceForm(vehicle) {
   });
 }
 
+// ── VOZILO ODVEZENO U SERVIS ──────────────────────────────────
+async function markServiceTaken(vehicle, service) {
+  if (!confirm(t("service_taken_confirm"))) return;
+  try {
+    await updateDoc(doc(db, "companies", S.companyId, "services", service.id), {
+      status: SERVICE_STATUS.IN_PROGRESS,
+      previousVehicleStatus: vehicle.status || "active",
+      takenAt: serverTimestamp(),
+    });
+    await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicle.id), {
+      status: "service", updatedAt: serverTimestamp(),
+    });
+    vehicle.status = "service"; // isti objekat referenciran i u allVehicles — ažurira i listu
+    refreshVehicleHeaderBadge(vehicle);
+    showToast(t("success"), "success");
+    const content = document.getElementById("vehicle-tab-content");
+    if (content) loadServiceTab(content, vehicle);
+  } catch (e) {
+    showToast(`${t("error")}: ${e.message}`, "error");
+  }
+}
+
+// ── SERVIS ZAVRŠEN ────────────────────────────────────────────
+function openCompleteServiceModal(vehicle, service) {
+  const bodyHTML = `
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">${t("service_end_date")}</label>
+        <input id="cs-endDate" class="form-input" type="date" value="${new Date().toISOString().split("T")[0]}" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">${t("service_end_km")}</label>
+        <input id="cs-endKm" class="form-input" type="number" value="${vehicle.currentKm || ""}" />
+      </div>
+    </div>
+  `;
+
+  openModal(t("service_complete_title"), bodyHTML, async () => {
+    try {
+      const endKm = numOrNull("cs-endKm");
+      await updateDoc(doc(db, "companies", S.companyId, "services", service.id), {
+        status: SERVICE_STATUS.DONE,
+        endDate: dateOrNull("cs-endDate"),
+        endKm,
+      });
+      const vehicleUpdate = {
+        status: service.previousVehicleStatus || "active",
+        updatedAt: serverTimestamp(),
+      };
+      if (endKm && endKm > (vehicle.currentKm || 0)) vehicleUpdate.currentKm = endKm;
+      await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicle.id), vehicleUpdate);
+
+      vehicle.status = vehicleUpdate.status;
+      if (vehicleUpdate.currentKm) vehicle.currentKm = vehicleUpdate.currentKm;
+      refreshVehicleHeaderBadge(vehicle);
+      showToast(t("success"), "success");
+      const content = document.getElementById("vehicle-tab-content");
+      if (content) loadServiceTab(content, vehicle);
+    } catch (e) {
+      showToast(`${t("error")}: ${e.message}`, "error");
+    }
+  });
+}
+
+// ── BRISANJE SERVISNOG ZAPISA ─────────────────────────────────
+async function confirmDeleteService(vehicle, serviceId) {
+  if (!confirm(t("confirm_delete"))) return;
+  try {
+    await deleteDoc(doc(db, "companies", S.companyId, "services", serviceId));
+    showToast(t("success"), "success");
+    const content = document.getElementById("vehicle-tab-content");
+    if (content) loadServiceTab(content, vehicle);
+  } catch (e) {
+    showToast(`${t("error")}: ${e.message}`, "error");
+  }
+}
+
+// ── AŽURIRAJ BADGE U HEADERU DETALJA (bez punog re-rendera) ───
+function refreshVehicleHeaderBadge(vehicle) {
+  const badge = document.querySelector(".detail-header__title .badge");
+  if (badge) {
+    badge.className = `badge badge--${vehicle.status || "active"}`;
+    badge.textContent = t("vehicle_status_" + (vehicle.status || "active"));
+  }
+}
+
 // ── HELPERS ───────────────────────────────────────────────────
 function detailTable(rows) {
   return `
@@ -797,15 +908,96 @@ function detailTable(rows) {
   `;
 }
 
-// ── ZAKAZANI SERVISI TAB je uklonjen ──────────────────────────
-// (nikad nije bio povezan ni sa jednim tab dugmetom u UI — mrtav kod)
+// ── ZAKAZANI SERVISI TAB ─────────────────────────────────────
+async function loadScheduledTab(content, vehicle) {
+  content.innerHTML = `<div class="loading">${t("loading")}</div>`;
+  const canEdit = S.profile?.role === "master_admin" || S.profile?.role === "fleet_admin";
 
+  try {
+    const scheduled = await getScheduledServices(S.companyId, { vehicleId: vehicle.id });
 
-function serviceItem(s) {
+    let html = "";
+
+    if (canEdit) {
+      html += `<div style="margin-bottom:12px">
+        <button class="btn btn--primary btn--sm" id="btn-schedule-new">📅 ${t("vehicle_scheduled_new")}</button>
+      </div>`;
+    }
+
+    if (scheduled.length === 0) {
+      html += `<p class="empty-text">${t("vehicle_scheduled_no_data")}</p>`;
+    } else {
+      html += `<div class="service-list">`;
+      for (const s of scheduled) {
+        const d = s.scheduledDate?.toDate ? s.scheduledDate.toDate() : new Date(s.scheduledDate);
+        const dateStr = d.toLocaleDateString(getCurrentLang() === "en" ? "en-GB" : "sr-RS", { day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit" });
+        html += `<div class="service-item" data-id="${s.id}">
+          <div class="service-item__header">
+            <span class="service-item__type">📅 ${t("service_type_" + s.serviceType) || s.serviceType}</span>
+            <span class="service-item__date">${dateStr}</span>
+          </div>`;
+        if (s.serviceProviderName)    html += `<div class="service-item__workshop">🔧 ${s.serviceProviderName}</div>`;
+        if (s.serviceProviderAddress) html += `<div class="service-item__workshop">📍 ${s.serviceProviderAddress}</div>`;
+        if (s.serviceProviderPhone)   html += `<div class="service-item__workshop">📞 ${s.serviceProviderPhone}</div>`;
+        if (s.notes)                  html += `<div class="service-item__desc">${s.notes}</div>`;
+        if (canEdit) html += `<button class="btn btn--danger btn--sm btn-cancel-scheduled" data-id="${s.id}" style="margin-top:8px">${t("schedule_cancel")}</button>`;
+        html += `</div>`;
+      }
+      html += `</div>`;
+    }
+
+    content.innerHTML = html;
+
+    document.getElementById("btn-schedule-new")?.addEventListener("click", () => {
+      openScheduleForm(vehicle);
+    });
+
+    content.querySelectorAll(".btn-cancel-scheduled").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        await cancelScheduledService(btn.dataset.id);
+        showToast(t("schedule_canceled"), "success");
+        loadScheduledTab(content, vehicle);
+      });
+    });
+
+  } catch (e) {
+    content.innerHTML = `<div class="error-state">${t("error")}: ${e.message}</div>`;
+  }
+}
+
+function serviceItem(s, vehicle, canEdit) {
+  const status = effectiveServiceStatus(s);
+  const today = isServiceToday(s);
+
+  const statusBadge = status === SERVICE_STATUS.PLANNED
+    ? `<span class="badge badge--info">${t("service_status_planned")}</span>`
+    : status === SERVICE_STATUS.IN_PROGRESS
+      ? `<span class="badge badge--service">${t("service_status_in_progress")}</span>`
+      : "";
+
+  const todayBadge = today && status !== SERVICE_STATUS.DONE
+    ? `<span class="today-badge">${t("dashboard_today")}</span>`
+    : "";
+
+  let actions = "";
+  if (canEdit) {
+    if (status === SERVICE_STATUS.PLANNED) {
+      actions += `<button class="btn btn--primary btn--sm btn-service-taken" data-id="${s.id}">${t("service_taken_btn")}</button>`;
+    } else if (status === SERVICE_STATUS.IN_PROGRESS) {
+      actions += `<button class="btn btn--primary btn--sm btn-service-complete" data-id="${s.id}">${t("service_complete_btn")}</button>`;
+    }
+    actions += `<button class="btn btn--ghost btn--sm btn-edit-service" data-id="${s.id}" title="${t("edit")}">✏️</button>`;
+    actions += `<button class="btn btn--ghost btn--sm btn-delete-service" data-id="${s.id}" title="${t("delete")}">🗑️</button>`;
+  }
+
   return `
-    <div class="service-item">
+    <div class="service-item ${today && status !== SERVICE_STATUS.DONE ? "service-item--today" : ""}">
       <div class="service-item__header">
-        <span class="badge badge--info">${t("service_type_" + s.serviceType) || s.serviceType}</span>
+        <div class="service-item__badges">
+          <span class="badge badge--info">${t("service_type_" + s.serviceType) || s.serviceType}</span>
+          ${statusBadge}
+          ${todayBadge}
+        </div>
         <span class="service-item__date">${formatDate(s.serviceDate)}</span>
       </div>
       ${s.description ? `<div class="service-item__desc">${s.description}</div>` : ""}
@@ -814,7 +1006,8 @@ function serviceItem(s) {
         ${s.cost ? `<span>💰 ${s.cost.toLocaleString()} RSD</span>` : ""}
         ${s.workshop ? `<span>🔧 ${s.workshop}</span>` : ""}
       </div>
-      ${s.nextDate ? `<div class="service-item__next">${t("vehicle_service_next")}: ${formatDate(s.nextDate)}${s.nextKm ? " / " + s.nextKm.toLocaleString() + " km" : ""}</div>` : ""}
+      ${s.endDate || s.endKm ? `<div class="service-item__next">${t("vehicle_service_end")}: ${formatDate(s.endDate)}${s.endKm ? " / " + s.endKm.toLocaleString() + " km" : ""}</div>` : ""}
+      ${actions ? `<div class="service-item__actions">${actions}</div>` : ""}
     </div>
   `;
 }
