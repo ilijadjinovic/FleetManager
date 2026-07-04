@@ -1160,6 +1160,10 @@ tbody td {
   border: 1px solid rgba(61,126,255,0.45);
   background: rgba(61,126,255,0.06);
 }
+.service-item--overdue {
+  border: 1px solid rgba(239,68,68,0.45);
+  background: rgba(239,68,68,0.06);
+}
 
 .assignment-item {
   background: var(--color-surface-2);

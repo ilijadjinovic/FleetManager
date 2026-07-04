@@ -457,6 +457,8 @@
   "service_end_km": "Završna kilometraža",
   "service_status_in_progress": "U servisu",
   "service_status_planned": "Zakazano",
+  "service_status_overdue": "Propušteno",
+  "service_overdue_days": "Kasni {{n}} dan(a)",
   "service_taken_btn": "🚗 Vozilo odvezeno u servis",
   "service_taken_confirm": "Potvrdi da je vozilo odvezeno u servis? Status vozila će biti promenjen na \"U servisu\".",
   "vehicle_service_end": "Završeno"

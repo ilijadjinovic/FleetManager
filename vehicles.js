@@ -12,7 +12,7 @@ import {
 import { t, getCurrentLang } from "./i18n.js";
 import { S, showToast, openModal, closeModal } from "./app.js";
 import { getServiceProviders } from "./servicers.js";
-import { effectiveServiceStatus, isServiceToday, SERVICE_STATUS } from "./service-status.js";
+import { effectiveServiceStatus, isServiceToday, isServiceOverdue, overdueDays, SERVICE_STATUS } from "./service-status.js";
 
 // ── PREDEFINISANE BOJE VOZILA ────────────────────────────────
 const VEHICLE_COLORS = [
@@ -338,6 +338,17 @@ async function loadServiceTab(container, vehicle) {
       )
     );
     const services = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    // Nadolazeći/u toku servisi na vrh (najbliži prvi), završeni ispod
+    // (najskoriji prvi) — a ne prosto po datumu opadajuće za sve.
+    services.sort((a, b) => {
+      const da = a.serviceDate?.toDate ? a.serviceDate.toDate() : new Date(a.serviceDate);
+      const db_ = b.serviceDate?.toDate ? b.serviceDate.toDate() : new Date(b.serviceDate);
+      const aDone = effectiveServiceStatus(a) === SERVICE_STATUS.DONE;
+      const bDone = effectiveServiceStatus(b) === SERVICE_STATUS.DONE;
+      if (aDone !== bDone) return aDone ? 1 : -1;
+      return aDone ? (db_ - da) : (da - db_);
+    });
 
     container.innerHTML = `
       ${canEdit ? `<div style="margin-bottom:12px"><button class="btn btn--primary btn--sm" id="btn-add-service">+ ${t("service_add")}</button></div>` : ""}
@@ -796,7 +807,7 @@ async function openServiceForm(vehicle, service = null) {
         // isto kao i ranije (direktno logovanje već odrađenog servisa).
         const today = new Date(); today.setHours(0, 0, 0, 0);
         const chosen = new Date(dateVal); chosen.setHours(0, 0, 0, 0);
-        data.status = chosen.getTime() > today.getTime() ? SERVICE_STATUS.PLANNED : SERVICE_STATUS.DONE;
+        data.status = chosen.getTime() >= today.getTime() ? SERVICE_STATUS.PLANNED : SERVICE_STATUS.DONE;
 
         await addDoc(collection(db, "companies", S.companyId, "services"), {
           ...data, createdBy: S.user.uid, createdAt: serverTimestamp(),
@@ -928,12 +939,15 @@ function detailTable(rows) {
 function serviceItem(s, vehicle, canEdit) {
   const status = effectiveServiceStatus(s);
   const today = isServiceToday(s);
+  const overdue = isServiceOverdue(s);
 
-  const statusBadge = status === SERVICE_STATUS.PLANNED
-    ? `<span class="badge badge--info">${t("service_status_planned")}</span>`
-    : status === SERVICE_STATUS.IN_PROGRESS
-      ? `<span class="badge badge--service">${t("service_status_in_progress")}</span>`
-      : "";
+  const statusBadge = overdue
+    ? `<span class="badge badge--broken">⚠️ ${t("service_status_overdue")} — ${t("service_overdue_days", { n: overdueDays(s) })}</span>`
+    : status === SERVICE_STATUS.PLANNED
+      ? `<span class="badge badge--info">${t("service_status_planned")}</span>`
+      : status === SERVICE_STATUS.IN_PROGRESS
+        ? `<span class="badge badge--service">${t("service_status_in_progress")}</span>`
+        : "";
 
   const todayBadge = today && status !== SERVICE_STATUS.DONE
     ? `<span class="today-badge">${t("dashboard_today")}</span>`
@@ -941,6 +955,9 @@ function serviceItem(s, vehicle, canEdit) {
 
   let actions = "";
   if (canEdit) {
+    // Dugme za potvrdu ostaje dostupno i kad je servis propušten (overdue) —
+    // administrator može da klikne "odvezeno" i sutra i kasnije, dugme nikad
+    // samo od sebe ne nestaje dok se ne klikne ili obriše zapis.
     if (status === SERVICE_STATUS.PLANNED) {
       actions += `<button class="btn btn--primary btn--sm btn-service-taken" data-id="${s.id}">${t("service_taken_btn")}</button>`;
     } else if (status === SERVICE_STATUS.IN_PROGRESS) {
@@ -951,7 +968,7 @@ function serviceItem(s, vehicle, canEdit) {
   }
 
   return `
-    <div class="service-item ${today && status !== SERVICE_STATUS.DONE ? "service-item--today" : ""}">
+    <div class="service-item ${overdue ? "service-item--overdue" : today && status !== SERVICE_STATUS.DONE ? "service-item--today" : ""}">
       <div class="service-item__header">
         <div class="service-item__badges">
           <span class="badge badge--info">${t("service_type_" + s.serviceType) || s.serviceType}</span>

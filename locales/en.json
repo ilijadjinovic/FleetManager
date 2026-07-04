@@ -457,6 +457,8 @@
   "service_end_km": "End mileage",
   "service_status_in_progress": "In service",
   "service_status_planned": "Scheduled",
+  "service_status_overdue": "Missed",
+  "service_overdue_days": "{{n}} day(s) overdue",
   "service_taken_btn": "🚗 Vehicle taken to service",
   "service_taken_confirm": "Confirm the vehicle was taken to service? Vehicle status will change to \"In service\".",
   "vehicle_service_end": "Completed"
