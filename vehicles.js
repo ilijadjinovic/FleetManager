@@ -209,13 +209,33 @@ function vehicleCard(v) {
 }
 
 // ── DETAIL POGLED ─────────────────────────────────────────────
-async function openVehicleDetail(vehicleId) {
+// initialTab — omogućava skok direktno na neki tab (npr. sa dashboarda na "service")
+export async function openVehicleDetail(vehicleId, initialTab = "tech") {
   currentVehicleId = vehicleId;
-  const vehicle = allVehicles.find(v => v.id === vehicleId);
-  if (!vehicle) return;
+  let vehicle = allVehicles.find(v => v.id === vehicleId);
+
+  // Ako vozilo nije u kešu (npr. ulazak direktno sa dashboarda, bez prethodne
+  // posete tabu "Vozila"), dohvati ga direktno iz Firestore-a.
+  if (!vehicle) {
+    try {
+      const snap = await getDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId));
+      if (!snap.exists()) return;
+      vehicle = { id: snap.id, ...snap.data() };
+      allVehicles.push(vehicle);
+    } catch {
+      return;
+    }
+  }
 
   const canEdit = S.profile?.role === "master_admin" || S.profile?.role === "fleet_admin";
   const container = document.getElementById("content");
+
+  const TABS = [
+    { key: "tech",        label: t("vehicle_tab_tech") },
+    { key: "finance",     label: t("vehicle_tab_finance") },
+    { key: "service",     label: t("vehicle_tab_service") },
+    { key: "assignments", label: t("vehicle_tab_assignments") },
+  ];
 
   container.innerHTML = `
     <div class="detail-header">
@@ -233,10 +253,9 @@ async function openVehicleDetail(vehicleId) {
     </div>
 
     <div class="tab-strip" id="vehicle-tabs">
-      <button class="tab-strip__btn tab-strip__btn--active" data-vtab="tech">${t("vehicle_tab_tech")}</button>
-      <button class="tab-strip__btn" data-vtab="finance">${t("vehicle_tab_finance")}</button>
-      <button class="tab-strip__btn" data-vtab="service">${t("vehicle_tab_service")}</button>
-      <button class="tab-strip__btn" data-vtab="assignments">${t("vehicle_tab_assignments")}</button>
+      ${TABS.map(tb => `
+        <button class="tab-strip__btn ${tb.key === initialTab ? "tab-strip__btn--active" : ""}" data-vtab="${tb.key}">${tb.label}</button>
+      `).join("")}
     </div>
 
     <div id="vehicle-tab-content"></div>
@@ -256,7 +275,7 @@ async function openVehicleDetail(vehicleId) {
     renderVehicleTab(btn.dataset.vtab, vehicle);
   });
 
-  renderVehicleTab("tech", vehicle);
+  renderVehicleTab(initialTab, vehicle);
 }
 
 // ── VEHICLE TABOVI ────────────────────────────────────────────
