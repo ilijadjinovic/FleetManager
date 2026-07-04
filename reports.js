@@ -11,6 +11,26 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { t } from "./i18n.js";
 import { S, showToast } from "./app.js";
+import { DEJAVU_SANS_REGULAR_B64, DEJAVU_SANS_BOLD_B64 } from "./fonts-dejavu.js";
+
+// ── FONT ZA SRPSKA SLOVA (š đ č ć ž) ───────────────────────────
+// jsPDF-ov ugradjeni "helvetica" font ne sadrzi ova slova (koristi
+// stari Adobe standard encoding), pa ih PDF prikazuje kao kvadratice
+// ili pogresne karaktere. Zato ugradjujemo DejaVu Sans (TTF) direktno
+// u dokument. Ime fonta koje se koristi kroz ceo fajl je "DejaVuSans".
+const REPORT_FONT = "DejaVuSans";
+
+function registerReportFont(pdf) {
+  pdf.addFileToVFS("DejaVuSans.ttf", DEJAVU_SANS_REGULAR_B64);
+  pdf.addFileToVFS("DejaVuSans-Bold.ttf", DEJAVU_SANS_BOLD_B64);
+  pdf.addFont("DejaVuSans.ttf", REPORT_FONT, "normal");
+  pdf.addFont("DejaVuSans-Bold.ttf", REPORT_FONT, "bold");
+  // Nemamo pravu kurziv (italic) varijantu fonta — mapiramo je na
+  // regular, jer je bolje da tekst ostane citljiv (sa š/đ/č/ć/ž)
+  // nego da jsPDF nemo padne na helvetica-italic (bez tih slova).
+  pdf.addFont("DejaVuSans.ttf", REPORT_FONT, "italic");
+  pdf.setFont(REPORT_FONT, "normal");
+}
 
 // ── jsPDF LOADER ──────────────────────────────────────────────
 async function getJsPDF() {
@@ -164,6 +184,7 @@ async function generateVehicleReport(allVehicles) {
     const vehicles = allVehicles.filter(v => selectedIds.includes(v.id));
 
     const pdf = new JsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+    registerReportFont(pdf);
     let firstPage = true;
 
     for (const vehicle of vehicles) {
@@ -227,6 +248,7 @@ async function generateDriverReport(allDrivers) {
     const drivers = allDrivers.filter(d => selectedIds.includes(d.id));
 
     const pdf = new JsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+    registerReportFont(pdf);
     let firstPage = true;
 
     for (const driver of drivers) {
@@ -279,14 +301,14 @@ function drawHeader(pdf, company, from, to) {
   let y = M;
 
   // Naziv firme — veliki
-  pdf.setFont("helvetica", "bold");
+  pdf.setFont(REPORT_FONT, "bold");
   pdf.setFontSize(16);
   pdf.setTextColor(26, 39, 68);
   pdf.text(company.name || "Fleet Manager", M, y);
   y += 7;
 
   // Podaci o firmi — mali
-  pdf.setFont("helvetica", "normal");
+  pdf.setFont(REPORT_FONT, "normal");
   pdf.setFontSize(8);
   pdf.setTextColor(100);
 
@@ -325,7 +347,7 @@ function drawSectionTitle(pdf, title, y) {
   checkPageBreak(pdf, y, 12);
   pdf.setFillColor(240, 244, 255);
   pdf.rect(M, y - 4, PW, 8, "F");
-  pdf.setFont("helvetica", "bold");
+  pdf.setFont(REPORT_FONT, "bold");
   pdf.setFontSize(10);
   pdf.setTextColor(26, 39, 68);
   pdf.text(title, M + 2, y + 1);
@@ -339,11 +361,11 @@ function drawRow(pdf, label, value, y, highlight = false) {
     pdf.setFillColor(248, 250, 255);
     pdf.rect(M, y - 3, PW, 6, "F");
   }
-  pdf.setFont("helvetica", "bold");
+  pdf.setFont(REPORT_FONT, "bold");
   pdf.setFontSize(8.5);
   pdf.setTextColor(80);
   pdf.text(String(label), M + 2, y);
-  pdf.setFont("helvetica", "normal");
+  pdf.setFont(REPORT_FONT, "normal");
   pdf.setTextColor(30);
   pdf.text(String(value), M + 65, y);
   return y + 6;
@@ -353,7 +375,7 @@ function drawTableHeader(pdf, cols, y) {
   checkPageBreak(pdf, y, 8);
   pdf.setFillColor(26, 39, 68);
   pdf.rect(M, y - 4, PW, 7, "F");
-  pdf.setFont("helvetica", "bold");
+  pdf.setFont(REPORT_FONT, "bold");
   pdf.setFontSize(8);
   pdf.setTextColor(255);
   let x = M + 2;
@@ -370,7 +392,7 @@ function drawTableRow(pdf, cols, values, y, shade = false) {
     pdf.setFillColor(248, 250, 255);
     pdf.rect(M, y - 4, PW, 6, "F");
   }
-  pdf.setFont("helvetica", "normal");
+  pdf.setFont(REPORT_FONT, "normal");
   pdf.setFontSize(8);
   pdf.setTextColor(40);
   let x = M + 2;
@@ -394,7 +416,7 @@ function checkPageBreak(pdf, y, needed = 10) {
 function drawPageNumber(pdf) {
   const pageCount = pdf.internal.getNumberOfPages();
   pdf.setPage(pageCount);
-  pdf.setFont("helvetica", "normal");
+  pdf.setFont(REPORT_FONT, "normal");
   pdf.setFontSize(8);
   pdf.setTextColor(150);
   pdf.text(`Strana ${pageCount}`, M + PW - 10, PH + 10, { align: "right" });
@@ -450,7 +472,7 @@ function drawAssignmentsSection(pdf, assignments, y) {
   const totalKm = assignments.reduce((s, a) => s + ((a.endKm || 0) - (a.startKm || 0)), 0);
   if (totalKm > 0) {
     y += 2;
-    pdf.setFont("helvetica", "bold");
+    pdf.setFont(REPORT_FONT, "bold");
     pdf.setFontSize(8.5);
     pdf.setTextColor(26, 39, 68);
     pdf.text(`Ukupno pređeno: ${totalKm.toLocaleString()} km`, M + 2, y);
@@ -484,7 +506,7 @@ function drawServicesSection(pdf, services, y) {
 
     if (s.description) {
       checkPageBreak(pdf, y, 6);
-      pdf.setFont("helvetica", "italic");
+      pdf.setFont(REPORT_FONT, "italic");
       pdf.setFontSize(7.5);
       pdf.setTextColor(100);
       pdf.text(`  → ${s.description.substring(0, 80)}`, M + 4, y);
@@ -495,7 +517,7 @@ function drawServicesSection(pdf, services, y) {
   const totalCost = services.reduce((s, srv) => s + (srv.cost || 0), 0);
   if (totalCost > 0) {
     y += 2;
-    pdf.setFont("helvetica", "bold");
+    pdf.setFont(REPORT_FONT, "bold");
     pdf.setFontSize(8.5);
     pdf.setTextColor(26, 39, 68);
     pdf.text(`Ukupni troškovi servisa: ${totalCost.toLocaleString()} RSD`, M + 2, y);
@@ -534,7 +556,7 @@ function drawFuelingsSection(pdf, fuelings, y) {
   const totalL    = fuelings.reduce((s, f) => s + (f.fuelAmount || 0), 0);
   const totalCost = fuelings.reduce((s, f) => s + (f.fuelCost   || 0), 0);
   y += 2;
-  pdf.setFont("helvetica", "bold");
+  pdf.setFont(REPORT_FONT, "bold");
   pdf.setFontSize(8.5);
   pdf.setTextColor(26, 39, 68);
   pdf.text(
@@ -569,7 +591,7 @@ function drawCostsSection(pdf, costs, y) {
 
   const total = costs.reduce((s, c) => s + (c.amount || 0), 0);
   y += 2;
-  pdf.setFont("helvetica", "bold");
+  pdf.setFont(REPORT_FONT, "bold");
   pdf.setFontSize(8.5);
   pdf.setTextColor(26, 39, 68);
   pdf.text(`Ukupno ostali troškovi: ${total.toLocaleString()} RSD`, M + 2, y);
@@ -590,7 +612,7 @@ function drawIncidentsSection(pdf, incidents, y) {
       pdf.rect(M, y - 3, PW, 16, "F");
     }
 
-    pdf.setFont("helvetica", "bold");
+    pdf.setFont(REPORT_FONT, "bold");
     pdf.setFontSize(8.5);
     pdf.setTextColor(26, 39, 68);
     pdf.text(
@@ -599,7 +621,7 @@ function drawIncidentsSection(pdf, incidents, y) {
     );
     y += 5;
 
-    pdf.setFont("helvetica", "normal");
+    pdf.setFont(REPORT_FONT, "normal");
     pdf.setFontSize(8);
     pdf.setTextColor(50);
     const descLines = pdf.splitTextToSize(inc.description || "", PW - 4);
@@ -667,7 +689,7 @@ function drawDriverAssignmentsSection(pdf, assignments, y) {
 
     if (a.tripType === "intercity" && a.destination) {
       checkPageBreak(pdf, y, 5);
-      pdf.setFont("helvetica", "italic");
+      pdf.setFont(REPORT_FONT, "italic");
       pdf.setFontSize(7.5);
       pdf.setTextColor(100);
       pdf.text(`  → Međugrad: ${a.destination}${a.route ? " / " + a.route : ""}`, M + 4, y);
@@ -677,7 +699,7 @@ function drawDriverAssignmentsSection(pdf, assignments, y) {
 
   if (totalKm > 0) {
     y += 2;
-    pdf.setFont("helvetica", "bold");
+    pdf.setFont(REPORT_FONT, "bold");
     pdf.setFontSize(8.5);
     pdf.setTextColor(26, 39, 68);
     pdf.text(`Ukupno pređeno: ${totalKm.toLocaleString()} km`, M + 2, y);
@@ -688,7 +710,7 @@ function drawDriverAssignmentsSection(pdf, assignments, y) {
 }
 
 function drawEmptyRow(pdf, y) {
-  pdf.setFont("helvetica", "italic");
+  pdf.setFont(REPORT_FONT, "italic");
   pdf.setFontSize(8);
   pdf.setTextColor(150);
   pdf.text("Nema podataka za izabrani period", M + 2, y);
