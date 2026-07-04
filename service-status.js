@@ -25,7 +25,11 @@ export function effectiveServiceStatus(s) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   d.setHours(0, 0, 0, 0);
-  return d.getTime() > today.getTime() ? SERVICE_STATUS.PLANNED : SERVICE_STATUS.DONE;
+  // "Danas" se i dalje tretira kao "planned" (nije još gotovo) — dan
+  // se ne završava dok ne prođe ponoć, pa servis zakazan za danas mora
+  // da ostane vidljiv i sa dugmetom sve dok se ne klikne ili dok dan
+  // ne prođe (tek sutra postaje "propušten", ne "done").
+  return d.getTime() >= today.getTime() ? SERVICE_STATUS.PLANNED : SERVICE_STATUS.DONE;
 }
 
 /** Da li je serviceDate danas (lokalno, ponoć-ponoć). */
