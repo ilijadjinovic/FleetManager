@@ -461,5 +461,9 @@
   "service_overdue_days": "{{n}} day(s) overdue",
   "service_taken_btn": "🚗 Vehicle taken to service",
   "service_taken_confirm": "Confirm the vehicle was taken to service? Vehicle status will change to \"In service\".",
-  "vehicle_service_end": "Completed"
+  "vehicle_service_end": "Completed",
+  "service_already_done_label": "Service was already completed",
+  "service_cancel_btn": "✕ Cancel service",
+  "service_cancel_confirm": "Cancel this service? If the vehicle was already taken to service, its status will revert to the previous one.",
+  "service_status_cancelled": "Cancelled"
 }

@@ -339,15 +339,16 @@ async function loadServiceTab(container, vehicle) {
     );
     const services = snap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    // Nadolazeći/u toku servisi na vrh (najbliži prvi), završeni ispod
-    // (najskoriji prvi) — a ne prosto po datumu opadajuće za sve.
+    // Nadolazeći/u toku/propušteni servisi na vrh (najzakasneliji/najbliži
+    // prvi), završeni i otkazani ispod (najskoriji prvi) — a ne prosto po
+    // datumu opadajuće za sve.
     services.sort((a, b) => {
       const da = a.serviceDate?.toDate ? a.serviceDate.toDate() : new Date(a.serviceDate);
       const db_ = b.serviceDate?.toDate ? b.serviceDate.toDate() : new Date(b.serviceDate);
-      const aDone = effectiveServiceStatus(a) === SERVICE_STATUS.DONE;
-      const bDone = effectiveServiceStatus(b) === SERVICE_STATUS.DONE;
-      if (aDone !== bDone) return aDone ? 1 : -1;
-      return aDone ? (db_ - da) : (da - db_);
+      const aResolved = [SERVICE_STATUS.DONE, SERVICE_STATUS.CANCELLED].includes(effectiveServiceStatus(a));
+      const bResolved = [SERVICE_STATUS.DONE, SERVICE_STATUS.CANCELLED].includes(effectiveServiceStatus(b));
+      if (aResolved !== bResolved) return aResolved ? 1 : -1;
+      return aResolved ? (db_ - da) : (da - db_);
     });
 
     container.innerHTML = `
@@ -380,6 +381,12 @@ async function loadServiceTab(container, vehicle) {
         btn.addEventListener("click", () => {
           const s = services.find(x => x.id === btn.dataset.id);
           if (s) openCompleteServiceModal(vehicle, s);
+        });
+      });
+      container.querySelectorAll(".btn-service-cancel").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const s = services.find(x => x.id === btn.dataset.id);
+          if (s) cancelService(vehicle, s);
         });
       });
     }
@@ -731,6 +738,14 @@ async function openServiceForm(vehicle, service = null) {
           value="${isEdit ? toDateInput(s.serviceDate) : new Date().toISOString().split("T")[0]}" />
       </div>
     </div>
+    ${!isEdit ? `
+    <div class="form-group form-group--checkbox">
+      <label class="form-checkbox-label">
+        <input id="sf-already-done" type="checkbox" />
+        ${t("service_already_done_label")}
+      </label>
+    </div>
+    ` : ""}
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">${t("service_km")}</label>
@@ -802,12 +817,13 @@ async function openServiceForm(vehicle, service = null) {
           ...data, updatedAt: serverTimestamp(),
         });
       } else {
-        // Novi zapis: ako je datum u budućnosti → "planned" (čeka potvrdu
-        // da je vozilo odvezeno). Ako je danas/u prošlosti → "done" odmah,
-        // isto kao i ranije (direktno logovanje već odrađenog servisa).
-        const today = new Date(); today.setHours(0, 0, 0, 0);
-        const chosen = new Date(dateVal); chosen.setHours(0, 0, 0, 0);
-        data.status = chosen.getTime() >= today.getTime() ? SERVICE_STATUS.PLANNED : SERVICE_STATUS.DONE;
+        // Novi zapis: status zavisi isključivo od checkbox-a "servis je već
+        // obavljen" — ne od datuma. Ako korisnik ne čekira, zapis ostaje
+        // "planned" (čeka potvrdu da je vozilo odvezeno) čak i ako je datum
+        // već u prošlosti — tada će se prikazati kao "propušteno" (overdue)
+        // sve dok neko ručno ne potvrdi ili otkaže.
+        const alreadyDone = document.getElementById("sf-already-done")?.checked || false;
+        data.status = alreadyDone ? SERVICE_STATUS.DONE : SERVICE_STATUS.PLANNED;
 
         await addDoc(collection(db, "companies", S.companyId, "services"), {
           ...data, createdBy: S.user.uid, createdAt: serverTimestamp(),
@@ -900,6 +916,32 @@ function openCompleteServiceModal(vehicle, service) {
   });
 }
 
+// ── OTKAZIVANJE SERVISA ───────────────────────────────────────
+async function cancelService(vehicle, service) {
+  if (!confirm(t("service_cancel_confirm"))) return;
+  try {
+    await updateDoc(doc(db, "companies", S.companyId, "services", service.id), {
+      status: SERVICE_STATUS.CANCELLED,
+    });
+
+    // Ako je servis bio "u toku" (vozilo već odvezeno) — otkazivanje vraća
+    // vozilo na status koji je imalo pre odlaska na servis.
+    if (effectiveServiceStatus(service) === SERVICE_STATUS.IN_PROGRESS && service.previousVehicleStatus) {
+      await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicle.id), {
+        status: service.previousVehicleStatus, updatedAt: serverTimestamp(),
+      });
+      vehicle.status = service.previousVehicleStatus;
+      refreshVehicleHeaderBadge(vehicle);
+    }
+
+    showToast(t("success"), "success");
+    const content = document.getElementById("vehicle-tab-content");
+    if (content) loadServiceTab(content, vehicle);
+  } catch (e) {
+    showToast(`${t("error")}: ${e.message}`, "error");
+  }
+}
+
 // ── BRISANJE SERVISNOG ZAPISA ─────────────────────────────────
 async function confirmDeleteService(vehicle, serviceId) {
   if (!confirm(t("confirm_delete"))) return;
@@ -941,34 +983,42 @@ function serviceItem(s, vehicle, canEdit) {
   const today = isServiceToday(s);
   const overdue = isServiceOverdue(s);
 
-  const statusBadge = overdue
-    ? `<span class="badge badge--broken">⚠️ ${t("service_status_overdue")} — ${t("service_overdue_days", { n: overdueDays(s) })}</span>`
-    : status === SERVICE_STATUS.PLANNED
-      ? `<span class="badge badge--info">${t("service_status_planned")}</span>`
-      : status === SERVICE_STATUS.IN_PROGRESS
-        ? `<span class="badge badge--service">${t("service_status_in_progress")}</span>`
-        : "";
+  const cancelled = status === SERVICE_STATUS.CANCELLED;
 
-  const todayBadge = today && status !== SERVICE_STATUS.DONE
+  const statusBadge = cancelled
+    ? `<span class="badge badge--cancelled">${t("service_status_cancelled")}</span>`
+    : overdue
+      ? `<span class="badge badge--broken">⚠️ ${t("service_status_overdue")} — ${t("service_overdue_days", { n: overdueDays(s) })}</span>`
+      : status === SERVICE_STATUS.PLANNED
+        ? `<span class="badge badge--info">${t("service_status_planned")}</span>`
+        : status === SERVICE_STATUS.IN_PROGRESS
+          ? `<span class="badge badge--service">${t("service_status_in_progress")}</span>`
+          : "";
+
+  const todayBadge = today && status !== SERVICE_STATUS.DONE && !cancelled
     ? `<span class="today-badge">${t("dashboard_today")}</span>`
     : "";
 
   let actions = "";
   if (canEdit) {
-    // Dugme za potvrdu ostaje dostupno i kad je servis propušten (overdue) —
-    // administrator može da klikne "odvezeno" i sutra i kasnije, dugme nikad
-    // samo od sebe ne nestaje dok se ne klikne ili obriše zapis.
+    // Dugmad za potvrdu/otkazivanje ostaju dostupna i kad je servis propušten
+    // (overdue) — administrator može da klikne i sutra i kasnije, dugmad nikad
+    // sama od sebe ne nestaju dok se ne klikne ili zapis ne bude otkazan/obrisan.
     if (status === SERVICE_STATUS.PLANNED) {
       actions += `<button class="btn btn--primary btn--sm btn-service-taken" data-id="${s.id}">${t("service_taken_btn")}</button>`;
+      actions += `<button class="btn btn--secondary btn--sm btn-service-cancel" data-id="${s.id}">${t("service_cancel_btn")}</button>`;
     } else if (status === SERVICE_STATUS.IN_PROGRESS) {
       actions += `<button class="btn btn--primary btn--sm btn-service-complete" data-id="${s.id}">${t("service_complete_btn")}</button>`;
+      actions += `<button class="btn btn--secondary btn--sm btn-service-cancel" data-id="${s.id}">${t("service_cancel_btn")}</button>`;
     }
-    actions += `<button class="btn btn--ghost btn--sm btn-edit-service" data-id="${s.id}" title="${t("edit")}">✏️</button>`;
+    if (!cancelled) {
+      actions += `<button class="btn btn--ghost btn--sm btn-edit-service" data-id="${s.id}" title="${t("edit")}">✏️</button>`;
+    }
     actions += `<button class="btn btn--ghost btn--sm btn-delete-service" data-id="${s.id}" title="${t("delete")}">🗑️</button>`;
   }
 
   return `
-    <div class="service-item ${overdue ? "service-item--overdue" : today && status !== SERVICE_STATUS.DONE ? "service-item--today" : ""}">
+    <div class="service-item ${cancelled ? "service-item--cancelled" : overdue ? "service-item--overdue" : today && status !== SERVICE_STATUS.DONE ? "service-item--today" : ""}">
       <div class="service-item__header">
         <div class="service-item__badges">
           <span class="badge badge--info">${t("service_type_" + s.serviceType) || s.serviceType}</span>

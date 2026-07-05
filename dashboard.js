@@ -12,7 +12,7 @@ import { S, setActiveCompany, navigateTo } from "./app.js";
 import { getCompanies } from "./firebase.js";
 import { isVehicleRegistered, openVehicleDetail } from "./vehicles.js";
 import { mountPendingBanner } from "./pending-requests.js";
-import { effectiveServiceStatus, isServiceToday, SERVICE_STATUS } from "./service-status.js";
+import { effectiveServiceStatus, isServiceToday, isServiceOverdue, overdueDays, SERVICE_STATUS } from "./service-status.js";
 
 export async function renderDashboard(container) {
   const isMasterAdmin = S.profile?.role === "master_admin";
@@ -137,8 +137,22 @@ async function loadDashboardData() {
     }
     const assignedCount = assignmentsSnap?.docs?.length || 0;
 
-    // Zakazani servisi = unosi u "Servisna istorija" sa datumom u budućnosti
-    // (narednih 30 dana) — ovako se u praksi zakazuje, kroz "Dodaj servis".
+    // Zakazani servisi = unosi u "Servisna istorija" koji još nisu rešeni
+    // (planned/in_progress). Dohvatamo u dva dela:
+    //  1) propušteni (serviceDate < danas) — moraju da ostanu vidljivi dok
+    //     ih neko ne potvrdi ili otkaže, bez obzira koliko kasne;
+    //  2) nadolazeći u narednih 30 dana (uključujući danas).
+    // Oba upita sortirana rastuće po datumu, pa spojena zadržavaju ispravan
+    // redosled: najzakasneliji prvi, pa dalje ka budućnosti.
+    const overdueServicesSnap = await getDocs(
+      query(
+        collection(db, "companies", cid, "services"),
+        where("serviceDate", "<", todayStart),
+        where("status", "in", [SERVICE_STATUS.PLANNED, SERVICE_STATUS.IN_PROGRESS]),
+        orderBy("serviceDate", "asc")
+      )
+    ).catch(() => ({ docs: [] }));
+
     const servicesSnap = await getDocs(
       query(
         collection(db, "companies", cid, "services"),
@@ -148,20 +162,26 @@ async function loadDashboardData() {
       )
     ).catch(() => ({ docs: [] }));
 
-    const upcomingScheduled = servicesSnap.docs
-      .map(d => {
-        const s = { id: d.id, ...d.data() };
-        const veh = vehicles.find(v => v.id === s.vehicleId);
-        return {
-          ...s,
-          vehicleBrand: veh?.brand || "",
-          vehicleModel: veh?.model || "",
-        };
-      })
-      // Servisi koji su u međuvremenu završeni (status "done") ne treba
-      // više da se prikazuju kao "nadolazeći" — čak i ako im je datum
-      // danas/u opsegu narednih 30 dana.
-      .filter(s => effectiveServiceStatus(s) !== SERVICE_STATUS.DONE);
+    const mapService = (d) => {
+      const s = { id: d.id, ...d.data() };
+      const veh = vehicles.find(v => v.id === s.vehicleId);
+      return {
+        ...s,
+        vehicleBrand: veh?.brand || "",
+        vehicleModel: veh?.model || "",
+      };
+    };
+
+    const upcomingScheduled = [
+      ...overdueServicesSnap.docs.map(mapService),
+      ...servicesSnap.docs.map(mapService),
+    ]
+      // Servisi koji su u međuvremenu završeni ili otkazani ne treba
+      // više da se prikazuju kao "nadolazeći"/"propušteni".
+      .filter(s => {
+        const st = effectiveServiceStatus(s);
+        return st !== SERVICE_STATUS.DONE && st !== SERVICE_STATUS.CANCELLED;
+      });
 
     const isDriver = role === "driver";
 
@@ -249,11 +269,15 @@ function renderAdminDashboard({ total, active, inService, unregistered, broken, 
               const d = s.serviceDate?.toDate ? s.serviceDate.toDate() : new Date(s.serviceDate);
               const daysLeft = Math.ceil((d - today) / (1000 * 60 * 60 * 24));
               const today_ = isServiceToday(s);
-              const urgency = today_ ? "today" : daysLeft <= 2 ? "urgent" : daysLeft <= 7 ? "warning" : "ok";
+              const overdue = isServiceOverdue(s);
+              const urgency = overdue ? "urgent" : today_ ? "today" : daysLeft <= 2 ? "urgent" : daysLeft <= 7 ? "warning" : "ok";
               const dateStr = formatDate(d);
               const status = effectiveServiceStatus(s);
               const inProgressBadge = status === SERVICE_STATUS.IN_PROGRESS
                 ? `<span class="today-badge" style="background:var(--color-warning)">${t("service_status_in_progress")}</span>` : "";
+              const overdueBadge = overdue
+                ? `<span class="today-badge" style="background:var(--color-danger)">⚠️ ${t("service_status_overdue")} — ${t("service_overdue_days", { n: overdueDays(s) })}</span>`
+                : "";
               return `
                 <div class="upcoming-item upcoming-item--${urgency}" data-vehicle-id="${s.vehicleId}" style="cursor:pointer">
                   <div class="upcoming-item__main">
@@ -265,6 +289,7 @@ function renderAdminDashboard({ total, active, inService, unregistered, broken, 
                     <span class="upcoming-item__date">
                       ${dateStr}
                       ${today_ ? `<span class="today-badge">${t("dashboard_today")}</span>` : ""}
+                      ${overdueBadge}
                       ${inProgressBadge}
                     </span>
                     <span class="upcoming-item__days">${daysLeft <= 0 ? "" : daysLeft + " " + t("dashboard_days_left")}</span>

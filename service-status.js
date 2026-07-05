@@ -16,6 +16,7 @@ export const SERVICE_STATUS = {
   PLANNED:     "planned",
   IN_PROGRESS: "in_progress",
   DONE:        "done",
+  CANCELLED:   "cancelled",
 };
 
 export function effectiveServiceStatus(s) {

@@ -461,5 +461,9 @@
   "service_overdue_days": "Kasni {{n}} dan(a)",
   "service_taken_btn": "🚗 Vozilo odvezeno u servis",
   "service_taken_confirm": "Potvrdi da je vozilo odvezeno u servis? Status vozila će biti promenjen na \"U servisu\".",
-  "vehicle_service_end": "Završeno"
+  "vehicle_service_end": "Završeno",
+  "service_already_done_label": "Servis je već obavljen",
+  "service_cancel_btn": "✕ Otkaži servis",
+  "service_cancel_confirm": "Otkazati ovaj servis? Ako je vozilo već odvezeno u servis, status vozila će se vratiti na prethodni.",
+  "service_status_cancelled": "Otkazano"
 }
