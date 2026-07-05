@@ -85,6 +85,7 @@ export async function renderVehicles(container, initialFilter = null) {
         <button class="chip ${currentFilter === 'service' ? 'chip--active' : ''}" data-filter="service">${t("vehicle_status_service")}</button>
         <button class="chip ${currentFilter === 'broken' ? 'chip--active' : ''}" data-filter="broken">${t("vehicle_status_broken")}</button>
         <button class="chip ${currentFilter === 'unregistered' ? 'chip--active' : ''}" data-filter="unregistered">${t("vehicle_status_unregistered")}</button>
+        <button class="chip ${currentFilter === 'archived' ? 'chip--active' : ''}" data-filter="archived">${t("vehicle_status_archived")}</button>
       </div>
     </div>
 
@@ -132,11 +133,18 @@ function renderList() {
   if (!list) return;
 
   let filtered = allVehicles;
-  if (currentFilter !== "all") {
-    if (currentFilter === "unregistered") {
-      filtered = filtered.filter(v => isVehicleRegistered(v) === false);
-    } else {
-      filtered = filtered.filter(v => v.status === currentFilter);
+  if (currentFilter === "archived") {
+    filtered = filtered.filter(v => v.archived === true);
+  } else {
+    // Arhivirana vozila se ne prikazuju ni u jednom drugom filteru
+    // (uključujući "svi") — vidljiva su samo iza posebnog filtera.
+    filtered = filtered.filter(v => v.archived !== true);
+    if (currentFilter !== "all") {
+      if (currentFilter === "unregistered") {
+        filtered = filtered.filter(v => isVehicleRegistered(v) === false);
+      } else {
+        filtered = filtered.filter(v => v.status === currentFilter);
+      }
     }
   }
   if (searchTerm) {
@@ -169,13 +177,16 @@ function vehicleCard(v) {
   const regWarning = daysToReg !== null && daysToReg <= 30;
 
   return `
-    <div class="vehicle-card" data-id="${v.id}">
+    <div class="vehicle-card ${v.archived ? "vehicle-card--archived" : ""}" data-id="${v.id}">
       <div class="vehicle-card__header">
         <div class="vehicle-card__info">
           <div class="vehicle-card__name">${v.brand} ${v.model}</div>
           <div class="vehicle-card__plate">${v.plate}</div>
         </div>
-        <span class="badge badge--${v.status || 'active'}">${t("vehicle_status_" + (v.status || "active"))}</span>
+        ${v.archived
+          ? `<span class="badge badge--cancelled">${t("vehicle_status_archived")}</span>`
+          : `<span class="badge badge--${v.status || 'active'}">${t("vehicle_status_" + (v.status || "active"))}</span>`
+        }
       </div>
       <div class="vehicle-card__details">
         <div class="vehicle-card__detail">
@@ -237,20 +248,31 @@ export async function openVehicleDetail(vehicleId, initialTab = "tech") {
     { key: "assignments", label: t("vehicle_tab_assignments") },
   ];
 
+  const isMasterAdmin = S.profile?.role === "master_admin";
+
   container.innerHTML = `
     <div class="detail-header">
       <button class="btn btn--ghost btn--sm" id="btn-back">${t("vehicle_back")}</button>
       <div class="detail-header__title">
         <h2>${vehicle.brand} ${vehicle.model}</h2>
-        <span class="badge badge--${vehicle.status || 'active'}">${t("vehicle_status_" + (vehicle.status || "active"))}</span>
+        ${vehicle.archived
+          ? `<span class="badge badge--cancelled">${t("vehicle_status_archived")}</span>`
+          : `<span class="badge badge--${vehicle.status || 'active'}">${t("vehicle_status_" + (vehicle.status || "active"))}</span>`
+        }
       </div>
       ${canEdit ? `
         <div class="detail-header__actions">
-          <button class="btn btn--secondary btn--sm" id="btn-edit-vehicle">✏️ ${t("edit")}</button>
-          <button class="btn btn--danger btn--sm" id="btn-delete-vehicle">🗑️ ${t("delete")}</button>
+          ${vehicle.archived ? `
+            <button class="btn btn--secondary btn--sm" id="btn-unarchive-vehicle">${t("vehicle_unarchive_btn")}</button>
+            ${isMasterAdmin ? `<button class="btn btn--danger btn--sm" id="btn-hard-delete-vehicle">${t("vehicle_hard_delete_btn")}</button>` : ""}
+          ` : `
+            <button class="btn btn--secondary btn--sm" id="btn-edit-vehicle">✏️ ${t("edit")}</button>
+            <button class="btn btn--danger btn--sm" id="btn-delete-vehicle">${t("vehicle_archive_btn")}</button>
+          `}
         </div>
       ` : ""}
     </div>
+    ${vehicle.archived ? `<div class="empty-state" style="padding:14px;margin-bottom:14px;text-align:left;background:var(--color-surface-2);border-radius:var(--radius-md);border:1px solid var(--color-border);">${t("vehicle_archived_notice")}</div>` : ""}
 
     <div class="tab-strip" id="vehicle-tabs">
       ${TABS.map(tb => `
@@ -264,7 +286,9 @@ export async function openVehicleDetail(vehicleId, initialTab = "tech") {
   document.getElementById("btn-back")?.addEventListener("click", () => renderVehicles(container));
   if (canEdit) {
     document.getElementById("btn-edit-vehicle")?.addEventListener("click", () => openVehicleForm(vehicle));
-    document.getElementById("btn-delete-vehicle")?.addEventListener("click", () => confirmDeleteVehicle(vehicle));
+    document.getElementById("btn-delete-vehicle")?.addEventListener("click", () => archiveVehicle(vehicle));
+    document.getElementById("btn-unarchive-vehicle")?.addEventListener("click", () => unarchiveVehicle(vehicle));
+    document.getElementById("btn-hard-delete-vehicle")?.addEventListener("click", () => confirmHardDeleteVehicle(vehicle));
   }
 
   document.getElementById("vehicle-tabs")?.addEventListener("click", (e) => {
@@ -328,7 +352,7 @@ function renderFinanceTab(v) {
 
 async function loadServiceTab(container, vehicle) {
   container.innerHTML = `<div class="loading">${t("loading")}</div>`;
-  const canEdit = S.profile?.role !== "driver";
+  const canEdit = S.profile?.role !== "driver" && !vehicle.archived;
   try {
     const snap = await getDocs(
       query(
@@ -704,9 +728,48 @@ async function saveVehicle(vehicleId) {
   }
 }
 
-// ── BRISANJE VOZILA ───────────────────────────────────────────
-function confirmDeleteVehicle(vehicle) {
-  if (!confirm(t("confirm_delete"))) return;
+// ── ARHIVIRANJE / VRAĆANJE / TRAJNO BRISANJE VOZILA ───────────
+function archiveVehicle(vehicle) {
+  if (!confirm(t("vehicle_archive_confirm"))) return;
+  updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicle.id), {
+    archived: true,
+    archivedAt: serverTimestamp(),
+    archivedBy: S.user?.uid || null,
+  })
+    .then(() => {
+      vehicle.archived = true;
+      showToast(t("success"), "success");
+      const container = document.getElementById("content");
+      if (container) openVehicleDetail(vehicle.id);
+    })
+    .catch(e => showToast(`${t("error")}: ${e.message}`, "error"));
+}
+
+function unarchiveVehicle(vehicle) {
+  if (!confirm(t("vehicle_unarchive_confirm"))) return;
+  updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicle.id), {
+    archived: false,
+  })
+    .then(() => {
+      vehicle.archived = false;
+      showToast(t("success"), "success");
+      const container = document.getElementById("content");
+      if (container) openVehicleDetail(vehicle.id);
+    })
+    .catch(e => showToast(`${t("error")}: ${e.message}`, "error"));
+}
+
+// Trajno brisanje — samo za master_admin, samo dok je vozilo već arhivirano
+// (mora se prvo svesno arhivirati pre nego što se trajno obriše). Briše samo
+// dokument vozila; istorija (servisi/vožnje/zaduženja/gorivo) ostaje u bazi
+// kao osirotinjeni zapisi — to je korisnik svesno prihvatio.
+function confirmHardDeleteVehicle(vehicle) {
+  const typed = prompt(`${t("vehicle_hard_delete_confirm_prompt")}\n\n${vehicle.plate}`);
+  if (typed === null) return;
+  if (typed.trim().toUpperCase() !== (vehicle.plate || "").trim().toUpperCase()) {
+    showToast(t("vehicle_hard_delete_mismatch"), "error");
+    return;
+  }
   deleteDoc(doc(db, "companies", S.companyId, "vehicles", vehicle.id))
     .then(() => {
       showToast(t("success"), "success");

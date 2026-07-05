@@ -457,6 +457,7 @@ body {
 .stat-card--unreg::before  { background: var(--color-danger); }
 .stat-card--broken::before  { background: #f97316; }
 .stat-card--assigned::before{ background: #8b5cf6; }
+.stat-card--archived::before{ background: #64748b; }
 
 .stat-card__value {
   font-size: 32px;
@@ -1160,6 +1161,14 @@ tbody td {
   border-color: var(--color-primary);
   transform: translateY(-1px);
   box-shadow: var(--shadow-md);
+}
+.vehicle-card--archived {
+  opacity: 0.55;
+  filter: grayscale(0.6);
+}
+.vehicle-card--archived:hover {
+  border-color: var(--color-border-light);
+  box-shadow: none;
 }
 .vehicle-card__header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
 .vehicle-card__name   { font-size: 15px; font-weight: 700; }

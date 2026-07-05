@@ -213,9 +213,11 @@ async function openAssignmentForm(existing = null) {
   const isEdit = !!existing;
   const a = existing || {};
 
-  // Aktivna vozila (i trenutno zaduženo ako editujemo)
+  // Aktivna, ne-arhivirana vozila (i trenutno zaduženo ako editujemo —
+  // makar bilo arhivirano u međuvremenu, mora ostati vidljivo pri edit-u
+  // da se postojeći zapis ne bi pokvario).
   const availableVehicles = allVehicles.filter(v =>
-    v.status === "active" || v.status === "unregistered" || v.id === a.vehicleId
+    v.id === a.vehicleId || (!v.archived && (v.status === "active" || v.status === "unregistered"))
   );
 
   // Aktivni vozači

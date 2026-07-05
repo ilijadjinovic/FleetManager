@@ -92,17 +92,22 @@ async function loadDashboardData() {
     const vehiclesSnap = await getDocs(collection(db, "companies", cid, "vehicles"));
     const vehicles = vehiclesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
+    // Arhivirana vozila se ne računaju u statistiku aktivne flote —
+    // imaju sopstvenu karticu i filter u tabu "Vozila".
+    const activeVehicles = vehicles.filter(v => v.archived !== true);
+    const archivedCount = vehicles.length - activeVehicles.length;
+
     // Statistika
-    const total = vehicles.length;
-    const active = vehicles.filter(v => v.status === "active").length;
-    const inService = vehicles.filter(v => v.status === "service").length;
-    const unregistered = vehicles.filter(v => isVehicleRegistered(v) === false).length;
-    const broken = vehicles.filter(v => v.status === "broken").length;
+    const total = activeVehicles.length;
+    const active = activeVehicles.filter(v => v.status === "active").length;
+    const inService = activeVehicles.filter(v => v.status === "service").length;
+    const unregistered = activeVehicles.filter(v => isVehicleRegistered(v) === false).length;
+    const broken = activeVehicles.filter(v => v.status === "broken").length;
 
     // Nadolazeće registracije (u sledećih 30 dana)
     const today = new Date();
     const in30 = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000);
-    const upcomingReg = vehicles
+    const upcomingReg = activeVehicles
       .filter(v => {
         if (!v.regExpiry) return false;
         const d = v.regExpiry.toDate ? v.regExpiry.toDate() : new Date(v.regExpiry);
@@ -177,17 +182,21 @@ async function loadDashboardData() {
       ...servicesSnap.docs.map(mapService),
     ]
       // Servisi koji su u međuvremenu završeni ili otkazani ne treba
-      // više da se prikazuju kao "nadolazeći"/"propušteni".
+      // više da se prikazuju kao "nadolazeći"/"propušteni". Servisi vozila
+      // koja su u međuvremenu arhivirana takođe se ne prikazuju — arhivirano
+      // vozilo je van aktivne flote i ne zahteva dalju pažnju na dashboardu.
       .filter(s => {
         const st = effectiveServiceStatus(s);
-        return st !== SERVICE_STATUS.DONE && st !== SERVICE_STATUS.CANCELLED;
+        if (st === SERVICE_STATUS.DONE || st === SERVICE_STATUS.CANCELLED) return false;
+        const veh = vehicles.find(v => v.id === s.vehicleId);
+        return veh?.archived !== true;
       });
 
     const isDriver = role === "driver";
 
     content.innerHTML = `
       ${isDriver ? renderDriverDashboard(assignmentsSnap) : renderAdminDashboard({
-        total, active, inService, unregistered, broken, upcomingReg, vehicles, assignedCount, upcomingScheduled
+        total, active, inService, unregistered, broken, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount
       })}
     `;
 
@@ -202,7 +211,7 @@ async function loadDashboardData() {
   }
 }
 
-function renderAdminDashboard({ total, active, inService, unregistered, broken, upcomingReg, vehicles, assignedCount, upcomingScheduled }) {
+function renderAdminDashboard({ total, active, inService, unregistered, broken, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount }) {
   const today = new Date();
   today.setHours(0, 0, 0, 0); // lokalna ponoć
 
@@ -228,6 +237,12 @@ function renderAdminDashboard({ total, active, inService, unregistered, broken, 
       <div class="stat-card stat-card--broken" data-nav="vehicles" data-filter="broken">
         <div class="stat-card__value">${broken}</div>
         <div class="stat-card__label">${t("vehicle_status_broken")}</div>
+      </div>
+      ` : ""}
+      ${archivedCount > 0 ? `
+      <div class="stat-card stat-card--archived" data-nav="vehicles" data-filter="archived">
+        <div class="stat-card__value">${archivedCount}</div>
+        <div class="stat-card__label">${t("dashboard_archived")}</div>
       </div>
       ` : ""}
       <div class="stat-card stat-card--assigned" data-nav="assignments">
