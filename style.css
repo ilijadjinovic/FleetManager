@@ -509,6 +509,45 @@ body {
   margin-bottom: 12px;
 }
 
+/* ── O APLIKACIJI ──────────────────────────────────────────── */
+.about-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  margin-top: 16px;
+}
+.about-card__title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 12px;
+}
+.about-card__author { display: flex; align-items: center; gap: 12px; }
+.about-card__avatar {
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  background: var(--color-primary-dark);
+  color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.about-card__name { font-weight: 700; font-size: 15px; }
+.about-card__role { font-size: 12px; color: var(--color-text-muted); }
+.about-card__divider { height: 1px; background: var(--color-border); margin: 14px 0; }
+.about-card__row {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px; color: var(--color-text);
+  padding: 6px 0;
+}
+.about-card__row a { color: var(--color-primary); text-decoration: none; }
+.about-card__row a:hover { text-decoration: underline; }
+.about-card__icon { width: 20px; height: 20px; border-radius: 5px; flex-shrink: 0; }
+
 .upcoming-item {
   display: flex;
   align-items: center;

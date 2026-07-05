@@ -89,6 +89,8 @@
   "vehicle_hard_delete_mismatch": "License plate did not match — deletion cancelled.",
   "vehicle_archived_notice": "📦 This vehicle is archived — viewing is possible, but all actions are disabled until it's restored from the archive.",
   "dashboard_archived": "Archived",
+  "about_title": "About",
+  "about_role": "Designed and developed by",
   "vehicle_status_inactive": "Inactive",
   "vehicle_current_km": "Current mileage",
   "vehicle_reg_expiry": "Registration expiry",

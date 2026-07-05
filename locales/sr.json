@@ -89,6 +89,8 @@
   "vehicle_hard_delete_mismatch": "Registarska oznaka se ne poklapa — brisanje otkazano.",
   "vehicle_archived_notice": "📦 Ovo vozilo je arhivirano — pregled je moguć, ali sve akcije su onemogućene dok se ne vrati iz arhive.",
   "dashboard_archived": "Arhivirano",
+  "about_title": "O aplikaciji",
+  "about_role": "Osmislio i implementirao",
   "vehicle_status_inactive": "Van upotrebe",
   "vehicle_current_km": "Trenutna kilometraža",
   "vehicle_reg_expiry": "Datum isteka registracije",
