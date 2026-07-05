@@ -151,7 +151,7 @@ async function loadDashboardData() {
         where("status", "in", [SERVICE_STATUS.PLANNED, SERVICE_STATUS.IN_PROGRESS]),
         orderBy("serviceDate", "asc")
       )
-    ).catch((e) => { console.error("DEBUG overdueServicesSnap greška:", e); return { docs: [] }; });
+    ).catch(() => ({ docs: [] }));
 
     const servicesSnap = await getDocs(
       query(
@@ -160,7 +160,7 @@ async function loadDashboardData() {
         where("serviceDate", "<=", in30),
         orderBy("serviceDate", "asc")
       )
-    ).catch((e) => { console.error("DEBUG servicesSnap greška:", e); return { docs: [] }; });
+    ).catch(() => ({ docs: [] }));
 
     const mapService = (d) => {
       const s = { id: d.id, ...d.data() };
@@ -182,10 +182,6 @@ async function loadDashboardData() {
         const st = effectiveServiceStatus(s);
         return st !== SERVICE_STATUS.DONE && st !== SERVICE_STATUS.CANCELLED;
       });
-
-    console.log("DEBUG overdueServicesSnap.docs.length:", overdueServicesSnap.docs.length);
-    console.log("DEBUG servicesSnap.docs.length:", servicesSnap.docs.length);
-    console.log("DEBUG upcomingScheduled:", upcomingScheduled);
 
     const isDriver = role === "driver";
 
