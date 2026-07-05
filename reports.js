@@ -68,7 +68,7 @@ export async function renderReports(container) {
 
     <!-- PERIOD -->
     <div class="report-card">
-      <div class="report-card__title">📅 Period izveštaja</div>
+      <div class="report-card__title">📅 ${t("report_period_title")}</div>
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">${t("report_date_from")}</label>
