@@ -77,7 +77,7 @@
   "vehicle_registered": "Registered",
   "vehicle_status_active": "Active",
   "vehicle_status_service": "In service",
-  "vehicle_status_broken": "Broken",
+  "vehicle_status_broken": "Out of Service",
   "vehicle_status_unregistered": "Unregistered",
   "vehicle_status_archived": "Archived",
   "vehicle_archive_btn": "📦 Archive",
