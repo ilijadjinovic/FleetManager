@@ -427,9 +427,20 @@ body {
 /* ── DASHBOARD STATISTIKE ────────────────────────────────── */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
   margin-bottom: 20px;
+}
+/* Popuni poslednji nepotpun red umesto da kartica "visi" sama sa
+   puno praznog prostora pored sebe. */
+.stats-grid > *:last-child:nth-child(4n+1) { grid-column: 1 / -1; }
+.stats-grid > *:nth-last-child(2):nth-child(4n+1) ~ * { grid-column: span 2; }
+
+@media (max-width: 640px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .stats-grid > *:last-child:nth-child(4n+1) { grid-column: auto; }
+  .stats-grid > *:nth-last-child(2):nth-child(4n+1) ~ * { grid-column: auto; }
+  .stats-grid > *:last-child:nth-child(2n+1) { grid-column: 1 / -1; }
 }
 
 .stat-card {
