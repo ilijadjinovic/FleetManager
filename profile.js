@@ -3,7 +3,7 @@
 //  Tab: Profil — podaci korisnika, podešavanja, jezik
 // ============================================================
 
-import { db, auth, logout } from "./firebase.js";
+import { db, auth, logout, linkLocalCredential } from "./firebase.js";
 import {
   doc, getDoc, updateDoc, serverTimestamp, collection, getDocs, query, where
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
@@ -375,6 +375,8 @@ function openEditCompanyModal(company) {
 // ── TAB: PODEŠAVANJA ──────────────────────────────────────────
 function renderSettingsTab({ profile }) {
   const currentLang = getCurrentLang();
+  const isLocalLogin = !!profile.username;
+  const canSetLocalLogin = profile.role === "fleet_admin" || profile.role === "master_admin";
 
   return `
     <div class="profile-section">
@@ -394,6 +396,20 @@ function renderSettingsTab({ profile }) {
         </label>
       </div>
     </div>
+
+    ${canSetLocalLogin ? `
+      <div class="profile-section">
+        <div class="profile-section__header">
+          <h3 class="profile-section__title">${t("profile_local_login_section")}</h3>
+        </div>
+        ${isLocalLogin ? `
+          <p class="form-hint">${t("profile_local_login_already_set")}: <strong>${profile.username}</strong></p>
+        ` : `
+          <p class="form-hint">${t("profile_local_login_hint")}</p>
+          <button class="btn btn--secondary btn--sm" id="btn-setup-local-login">🔑 ${t("profile_local_login_setup_btn")}</button>
+        `}
+      </div>
+    ` : ""}
 
     <div class="profile-section">
       <div class="profile-section__header">
@@ -432,6 +448,50 @@ function bindSettingsTab({ profile }) {
       rerenderCurrentTab();
       showToast(radio.value === "sr" ? t("profile_lang_changed_sr") : t("profile_lang_changed_en"), "success");
     });
+  });
+
+  // Podešavanje lokalnog login-a (fleet_admin / master_admin)
+  document.getElementById("btn-setup-local-login")?.addEventListener("click", () => {
+    openSetupLocalLoginModal(profile);
+  });
+}
+
+function openSetupLocalLoginModal(profile) {
+  const bodyHTML = `
+    <div class="form-group">
+      <label class="form-label">${t("profile_local_login_username")}</label>
+      <input id="ll-username" class="form-input" type="text" autocomplete="off" />
+    </div>
+    <div class="form-group">
+      <label class="form-label">${t("profile_local_login_password")}</label>
+      <input id="ll-password" class="form-input" type="password" autocomplete="new-password" />
+    </div>
+    <p class="form-hint">${t("profile_local_login_hint")}</p>
+  `;
+
+  openModal(t("profile_local_login_setup_btn"), bodyHTML, async () => {
+    const username = document.getElementById("ll-username")?.value.trim();
+    const password = document.getElementById("ll-password")?.value;
+    if (!username || !password) {
+      showToast(t("required_field"), "warning");
+      return;
+    }
+    if (password.length < 6) {
+      showToast(t("profile_local_login_pw_short"), "warning");
+      return;
+    }
+    try {
+      await linkLocalCredential(username, password);
+      await updateDoc(doc(db, "users", S.user.uid), {
+        username, updatedAt: serverTimestamp()
+      });
+      S.profile.username = username;
+      showToast(t("profile_local_login_success"), "success");
+      const container = document.getElementById("content");
+      if (container) renderProfile(container);
+    } catch (e) {
+      showToast(`${t("error")}: ${e.message}`, "error");
+    }
   });
 }
 

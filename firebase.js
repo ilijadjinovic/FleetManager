@@ -8,6 +8,8 @@ import { initializeApp as initializeSecondaryApp } from "https://www.gstatic.com
 import {
   getAuth,
   GoogleAuthProvider,
+  EmailAuthProvider,
+  linkWithCredential,
   signInWithPopup,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
@@ -112,6 +114,22 @@ export async function logout() {
 /** Helper: username → fake email */
 export function usernameToEmail(username) {
   return `${username.toLowerCase().replace(/\s+/g, ".")}@fleetapp.internal`;
+}
+
+/**
+ * Vezuje lokalni (username/password) login za VEĆ ulogovanog korisnika
+ * (fleet_admin ili master_admin sebi dodaje drugi način prijave).
+ * Za razliku od createLocalAccount() (koji pravi NOV Firebase Auth nalog
+ * za vozača preko sekundarne app instance), ovo koristi linkWithCredential
+ * da doda email/password metod prijave NA ISTI Auth nalog (isti uid),
+ * tako da korisnikov profil i sve veze ostaju netaknute.
+ */
+export async function linkLocalCredential(username, password) {
+  const user = auth.currentUser;
+  if (!user) throw new Error("Nema ulogovanog korisnika");
+  const email = usernameToEmail(username);
+  const credential = EmailAuthProvider.credential(email, password);
+  return linkWithCredential(user, credential);
 }
 
 /**

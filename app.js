@@ -53,6 +53,11 @@ async function init() {
         return;
       }
 
+      if (S.profile.status === "blocked") {
+        showBlocked();
+        return;
+      }
+
       // Postavi companyId
       S.companyId = S.profile.role === "master_admin"
         ? (S.profile.lastCompanyId || null)
@@ -97,6 +102,21 @@ function showRejected() {
     </div>
   `;
   document.getElementById("btn-rejected-logout")?.addEventListener("click", doLogout);
+}
+
+function showBlocked() {
+  document.getElementById("login-screen").classList.add("hidden");
+  const app = document.getElementById("app");
+  app.classList.remove("hidden");
+  app.innerHTML = `
+    <div class="access-denied">
+      <div class="access-denied__icon">🔒</div>
+      <h2>${t("app_blocked_title")}</h2>
+      <p>${t("app_blocked_msg")}</p>
+      <button class="btn btn--secondary" id="btn-blocked-logout">${t("app_blocked_logout")}</button>
+    </div>
+  `;
+  document.getElementById("btn-blocked-logout")?.addEventListener("click", doLogout);
 }
 
 function showApp() {

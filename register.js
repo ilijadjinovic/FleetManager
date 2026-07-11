@@ -275,34 +275,51 @@ async function checkPib() {
   }
 }
 
-function proceedStep2() {
+async function proceedStep2() {
   const pib = document.getElementById("r-pib")?.value.trim();
   if (!pib) { showStepError("step2-error", t("reg_pib_required")); return; }
 
-  if (R.joinExisting) {
-    // Pridružuje se postojećoj firmi — samo pređi na korak 3
+  const btn = document.getElementById("btn-step2-next");
+  if (btn) { btn.disabled = true; btn.textContent = "..."; }
+
+  try {
+    // UVEK ponovo proveri PIB na serveru — ne oslanjaj se na to da li je
+    // korisnik ranije kliknuo "Proveri PIB". Ovo sprečava da neko
+    // zaobiđe proveru i kreira duplikat firme sa istim PIB-om.
+    const snap = await getDocs(query(collection(db, "companies"), where("pib", "==", pib)));
+
+    if (!snap.empty) {
+      const existing = { id: snap.docs[0].id, ...snap.docs[0].data() };
+      R.company = existing;
+      R.joinExisting = true;
+      setStep(3);
+      return;
+    }
+
+    // PIB ne postoji — nastavi kao nova firma
+    R.joinExisting = false;
+    const name = document.getElementById("r-companyName")?.value.trim();
+    if (!name) { showStepError("step2-error", t("required_field") + ": " + t("company_name")); return; }
+
+    R.companyData = {
+      pib,
+      name,
+      mbr:      document.getElementById("r-mbr")?.value.trim() || null,
+      owner:    document.getElementById("r-owner")?.value.trim() || null,
+      director: document.getElementById("r-director")?.value.trim() || null,
+      address:  document.getElementById("r-companyAddress")?.value.trim() || null,
+      phone:    document.getElementById("r-companyPhone")?.value.trim() || null,
+      email:    document.getElementById("r-companyEmail")?.value.trim() || null,
+      instagram:document.getElementById("r-instagram")?.value.trim() || null,
+      facebook: document.getElementById("r-facebook")?.value.trim() || null,
+    };
+
     setStep(3);
-    return;
+  } catch (e) {
+    showStepError("step2-error", `${t("error")}: ${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = t("reg_next"); }
   }
-
-  // Nova firma — validacija
-  const name = document.getElementById("r-companyName")?.value.trim();
-  if (!name) { showStepError("step2-error", t("required_field") + ": " + t("company_name")); return; }
-
-  R.companyData = {
-    pib,
-    name,
-    mbr:      document.getElementById("r-mbr")?.value.trim() || null,
-    owner:    document.getElementById("r-owner")?.value.trim() || null,
-    director: document.getElementById("r-director")?.value.trim() || null,
-    address:  document.getElementById("r-companyAddress")?.value.trim() || null,
-    phone:    document.getElementById("r-companyPhone")?.value.trim() || null,
-    email:    document.getElementById("r-companyEmail")?.value.trim() || null,
-    instagram:document.getElementById("r-instagram")?.value.trim() || null,
-    facebook: document.getElementById("r-facebook")?.value.trim() || null,
-  };
-
-  setStep(3);
 }
 
 // ── KORAK 3 — PREGLED I SUBMIT ────────────────────────────────

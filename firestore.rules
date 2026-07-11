@@ -56,7 +56,11 @@ service cloud.firestore {
 
     // ── KOMPANIJE ────────────────────────────────────────────
     match /companies/{companyId} {
-      allow read: if isCompanyMember(companyId);
+      // Čitanje dozvoljeno svakom prijavljenom korisniku (ne samo članovima firme),
+      // jer je PIB/naziv/adresa javni podatak i ova provera je neophodna
+      // pri self-registraciji (provera da li firma već postoji po PIB-u),
+      // pre nego što korisnik uopšte ima users/{uid} dokument.
+      allow read: if isAuth();
       // Fleet admin može kreirati firmu (self-registration)
       allow create: if isAuth();
       allow update: if isMasterAdmin() || isFleetAdmin(companyId);
@@ -66,10 +70,13 @@ service cloud.firestore {
       match /vehicles/{vehicleId} {
         allow read: if isCompanyMember(companyId);
         allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
-        // Vozač može da update-uje currentKm (pri točenju)
+        // Vozač može da update-uje currentKm (pri točenju) i da očisti
+        // assignedDriverName pri sopstvenom razduženju (samo na null)
         allow update: if isDriver(companyId)
           && request.resource.data.diff(resource.data).affectedKeys()
-              .hasOnly(['currentKm', 'updatedAt']);
+              .hasOnly(['currentKm', 'updatedAt', 'assignedDriverName'])
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['assignedDriverName'])
+              || request.resource.data.assignedDriverName == null);
       }
 
       // ── VOZAČI ────────────────────────────────────────────
@@ -82,12 +89,19 @@ service cloud.firestore {
       match /assignments/{assignmentId} {
         allow read: if isCompanyMember(companyId);
         allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
-        // Vozač može da zatvori svoje zaduženje i update-uje km
+        // Vozač može da zatvori svoje zaduženje i update-uje km.
+        // Vlasništvo se proverava preko driverUid ILI driverId — jer za
+        // vozače sa Google loginom driverUid na zaduženju može biti prazan
+        // (postavlja se samo iz driver.localAuthUid), pa se u tom slučaju
+        // poklapanje mora raditi preko driverId (isto kao fallback u JS kodu).
         allow update: if isDriver(companyId)
-          && resource.data.driverUid == request.auth.uid
+          && (resource.data.driverUid == request.auth.uid
+              || (getUserData().get('driverId', null) != null
+                  && resource.data.get('driverId', null) == getUserData().get('driverId', null)))
           && request.resource.data.diff(resource.data).affectedKeys()
               .hasOnly(['status', 'endDate', 'endKm', 'kmMismatch',
-                        'driverStartKm', 'unassignNotes', 'closedByDriver', 'updatedAt']);
+                        'driverStartKm', 'unassignNotes', 'closedByDriver', 'updatedAt',
+                        'kmConfirmed', 'kmConfirmedValue', 'kmConfirmedAt']);
       }
 
       // ── TRIP ENTRIES (gorivo, putarine, prijave) ──────────

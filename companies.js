@@ -10,6 +10,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { t } from "./i18n.js";
 import { S, showToast, openModal } from "./app.js";
+import { mountPendingBanner } from "./pending-requests.js";
 
 export async function renderCompanies(container) {
   if (S.profile?.role !== "master_admin") {
@@ -29,99 +30,13 @@ export async function renderCompanies(container) {
     <div id="companies-list"><div class="loading">${t("loading")}</div></div>
   `;
 
-  await Promise.all([loadPendingRequests(), loadCompanies()]);
-}
-
-// ── PENDING ZAHTEVI ───────────────────────────────────────────
-async function loadPendingRequests() {
-  const section = document.getElementById("pending-section");
-  try {
-    const snap = await getDocs(
-      query(collection(db, "adminNotifications"),
-        where("type", "==", "pending_fleet_admin"),
-        where("status", "==", "unread"),
-        orderBy("createdAt", "desc")
-      )
-    );
-
-    const pending = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    if (pending.length === 0) { section.innerHTML = ""; return; }
-
-    section.innerHTML = `
-      <div class="pending-banner">
-        <div class="pending-banner__title">
-          🔔 ${t("company_pending_title")} (${pending.length})
-        </div>
-        <div class="pending-list" id="pending-list">
-          ${pending.map(p => pendingItem(p)).join("")}
-        </div>
-      </div>
-    `;
-
-    // Bind dugmadi
-    section.querySelectorAll(".btn-approve").forEach(btn => {
-      btn.addEventListener("click", () => approveUser(btn.dataset.uid, btn.dataset.notifId));
-    });
-    section.querySelectorAll(".btn-reject").forEach(btn => {
-      btn.addEventListener("click", () => rejectUser(btn.dataset.uid, btn.dataset.notifId));
-    });
-
-  } catch (e) {
-    section.innerHTML = "";
-    console.error("Pending load error:", e);
-  }
-}
-
-function pendingItem(p) {
-  return `
-    <div class="pending-item" id="pending-${p.id}">
-      <div class="pending-item__info">
-        <strong>${p.userName}</strong>
-        <span class="pending-item__company">
-          🏢 ${p.companyName}
-          ${p.joinExisting
-            ? `<span class="badge badge--info" style="margin-left:6px">${t("company_join_badge")}</span>`
-            : `<span class="badge badge--active" style="margin-left:6px">${t("company_new_badge")}</span>`}
-        </span>
-      </div>
-      <div class="pending-item__actions">
-        <button class="btn btn--primary btn--sm btn-approve"
-          data-uid="${p.userUid}" data-notif-id="${p.id}">
-          ${t("approve")}
-        </button>
-        <button class="btn btn--danger btn--sm btn-reject"
-          data-uid="${p.userUid}" data-notif-id="${p.id}">
-          ${t("reject")}
-        </button>
-      </div>
-    </div>
-  `;
-}
-
-async function approveUser(uid, notifId) {
-  try {
-    await updateDoc(doc(db, "users", uid), {
-      status: "active", approvedAt: serverTimestamp(), approvedBy: S.user.uid
-    });
-    await updateDoc(doc(db, "adminNotifications", notifId), { status: "resolved" });
-    document.getElementById(`pending-${notifId}`)?.remove();
-    showToast(t("company_approved_msg"), "success");
-    loadCompanies();
-  } catch (e) {
-    showToast(`${t("error")}: ${e.message}`, "error");
-  }
-}
-
-async function rejectUser(uid, notifId) {
-  if (!confirm(t("confirm_delete"))) return;
-  try {
-    await updateDoc(doc(db, "users", uid), { status: "rejected" });
-    await updateDoc(doc(db, "adminNotifications", notifId), { status: "resolved" });
-    document.getElementById(`pending-${notifId}`)?.remove();
-    showToast(t("company_rejected_msg"), "warning");
-  } catch (e) {
-    showToast(`${t("error")}: ${e.message}`, "error");
-  }
+  await Promise.all([
+    mountPendingBanner(document.getElementById("pending-section"), {
+      compact: false,
+      onChange: loadCompanies, // posle approve/reject — refresh broja admina na karticama
+    }),
+    loadCompanies(),
+  ]);
 }
 
 // ── LISTA FIRMI ───────────────────────────────────────────────
@@ -171,14 +86,32 @@ async function loadCompanies() {
       btn.addEventListener("click", () => confirmDeleteCompany(btn.dataset.id, btn.dataset.name));
     });
 
+    // ── AKCIJE NAD FLEET ADMINIMA ──────────────────────────────
+    listEl.querySelectorAll(".btn-admin-edit").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const admin = enriched.flatMap(c => c.admins).find(a => a.id === btn.dataset.id);
+        if (admin) openEditAdminModal(admin);
+      });
+    });
+    listEl.querySelectorAll(".btn-admin-toggle-block").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const isBlocked = btn.dataset.blocked === "true";
+        toggleBlockAdmin(btn.dataset.id, isBlocked);
+      });
+    });
+    listEl.querySelectorAll(".btn-admin-delete").forEach(btn => {
+      btn.addEventListener("click", () => confirmDeleteAdmin(btn.dataset.id, btn.dataset.name));
+    });
+
   } catch (e) {
     listEl.innerHTML = `<div class="error-state">${t("error")}: ${e.message}</div>`;
   }
 }
 
 function companyCard(c) {
-  const activeAdmins = c.admins.filter(a => a.status === "active");
+  const activeAdmins  = c.admins.filter(a => a.status === "active");
   const pendingAdmins = c.admins.filter(a => a.status === "pending");
+  const blockedAdmins = c.admins.filter(a => a.status === "blocked");
 
   return `
     <div class="company-card">
@@ -218,20 +151,48 @@ function companyCard(c) {
             <span class="company-stat__label">${t("company_pending_label")}</span>
           </div>
         ` : ""}
+        ${blockedAdmins.length > 0 ? `
+          <div class="company-stat">
+            <span class="company-stat__value" style="color:var(--color-danger)">${blockedAdmins.length}</span>
+            <span class="company-stat__label">${t("company_blocked_label")}</span>
+          </div>
+        ` : ""}
       </div>
 
       ${activeAdmins.length > 0 ? `
         <div class="company-card__admins">
           <div class="company-admins__title">${t("company_fleet_admins_title")}</div>
-          ${activeAdmins.map(a => `
-            <div class="company-admin-item">
-              <span>👤 ${a.displayName || a.firstName + " " + a.lastName}</span>
-              ${a.phone ? `<span class="company-admin-contact">📞 ${a.phone}</span>` : ""}
-              ${a.email ? `<span class="company-admin-contact">✉️ ${a.email}</span>` : ""}
-            </div>
-          `).join("")}
+          ${activeAdmins.map(a => adminItem(a, false)).join("")}
         </div>
       ` : ""}
+
+      ${blockedAdmins.length > 0 ? `
+        <div class="company-card__admins">
+          <div class="company-admins__title">${t("company_blocked_label")}</div>
+          ${blockedAdmins.map(a => adminItem(a, true)).join("")}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function adminItem(a, isBlocked) {
+  return `
+    <div class="company-admin-item" data-admin-id="${a.id}">
+      <span>👤 ${a.displayName || `${a.firstName || ""} ${a.lastName || ""}`.trim()}
+        ${isBlocked ? `<span class="badge badge--danger" style="margin-left:6px">${t("company_blocked_badge")}</span>` : ""}
+      </span>
+      ${a.phone ? `<span class="company-admin-contact">📞 ${a.phone}</span>` : ""}
+      ${a.email ? `<span class="company-admin-contact">✉️ ${a.email}</span>` : ""}
+      <div class="company-admin-item__actions">
+        <button class="btn btn--ghost btn--sm btn-admin-edit" data-id="${a.id}" title="${t("edit")}">✏️</button>
+        <button class="btn btn--ghost btn--sm btn-admin-toggle-block" data-id="${a.id}" data-blocked="${isBlocked}"
+          title="${isBlocked ? t("company_admin_unblock") : t("company_admin_block")}">
+          ${isBlocked ? "🔓" : "🔒"}
+        </button>
+        <button class="btn btn--ghost btn--sm btn-admin-delete" data-id="${a.id}"
+          data-name="${a.displayName || `${a.firstName || ""} ${a.lastName || ""}`.trim()}" title="${t("delete")}">🗑️</button>
+      </div>
     </div>
   `;
 }
@@ -320,6 +281,88 @@ async function confirmDeleteCompany(id, name) {
   if (!confirm(`${t("company_delete_confirm")} "${name}"?`)) return;
   try {
     await deleteDoc(doc(db, "companies", id));
+    showToast(t("success"), "success");
+    loadCompanies();
+  } catch (e) {
+    showToast(`${t("error")}: ${e.message}`, "error");
+  }
+}
+
+// ── IZMENA FLEET ADMINA ────────────────────────────────────────
+function openEditAdminModal(admin) {
+  const a = admin;
+  const bodyHTML = `
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Ime</label>
+        <input id="ea-firstName" class="form-input" type="text" value="${a.firstName || ""}" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Prezime</label>
+        <input id="ea-lastName" class="form-input" type="text" value="${a.lastName || ""}" />
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">Telefon</label>
+        <input id="ea-phone" class="form-input" type="tel" value="${a.phone || ""}" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">${t("driver_email")} (kontakt)</label>
+        <input id="ea-email" class="form-input" type="email" value="${a.email || ""}" />
+      </div>
+    </div>
+    <p class="form-hint">${t("company_admin_google_hint")}</p>
+  `;
+
+  openModal(`${t("edit")}: ${a.displayName || a.firstName}`, bodyHTML, async () => {
+    const firstName = document.getElementById("ea-firstName")?.value.trim();
+    const lastName  = document.getElementById("ea-lastName")?.value.trim();
+    if (!firstName || !lastName) return;
+    try {
+      await updateDoc(doc(db, "users", a.id), {
+        firstName,
+        lastName,
+        displayName: `${firstName} ${lastName}`,
+        phone: document.getElementById("ea-phone")?.value.trim() || null,
+        email: document.getElementById("ea-email")?.value.trim() || null,
+        updatedAt: serverTimestamp(),
+      });
+      showToast(t("success"), "success");
+      loadCompanies();
+    } catch (e) {
+      showToast(`${t("error")}: ${e.message}`, "error");
+    }
+  });
+}
+
+// ── BLOKIRANJE / ODBLOKIRANJE FLEET ADMINA ─────────────────────
+// Privremena mera — profil i sve veze (firma, istorija) ostaju netaknuti.
+// Blokirani korisnik biva odmah izbačen na sledeći auth-state okidač
+// (app.js proverava status === "blocked").
+async function toggleBlockAdmin(uid, isCurrentlyBlocked) {
+  const action = isCurrentlyBlocked ? t("company_admin_unblock") : t("company_admin_block");
+  if (!confirm(`${action}?`)) return;
+  try {
+    await updateDoc(doc(db, "users", uid), {
+      status: isCurrentlyBlocked ? "active" : "blocked",
+      updatedAt: serverTimestamp(),
+    });
+    showToast(t("success"), "success");
+    loadCompanies();
+  } catch (e) {
+    showToast(`${t("error")}: ${e.message}`, "error");
+  }
+}
+
+// ── TRAJNO BRISANJE FLEET ADMINA ───────────────────────────────
+// Briše samo Firestore profil (users/{uid}). Google Auth nalog fizički
+// ostaje (klijentski SDK ne može da obriše tuđi Auth nalog bez Cloud
+// Function/Admin SDK-a) — osoba može ponovo da se registruje od nule.
+async function confirmDeleteAdmin(uid, name) {
+  if (!confirm(`${t("company_admin_delete_confirm")} "${name}"?\n\n${t("company_admin_delete_note")}`)) return;
+  try {
+    await deleteDoc(doc(db, "users", uid));
     showToast(t("success"), "success");
     loadCompanies();
   } catch (e) {

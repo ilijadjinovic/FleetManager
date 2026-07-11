@@ -84,6 +84,7 @@ export async function renderVehicles(container, initialFilter = null) {
         <button class="chip ${currentFilter === 'active' ? 'chip--active' : ''}" data-filter="active">${t("vehicle_status_active")}</button>
         <button class="chip ${currentFilter === 'service' ? 'chip--active' : ''}" data-filter="service">${t("vehicle_status_service")}</button>
         <button class="chip ${currentFilter === 'broken' ? 'chip--active' : ''}" data-filter="broken">${t("vehicle_status_broken")}</button>
+        <button class="chip ${currentFilter === 'inactive' ? 'chip--active' : ''}" data-filter="inactive">${t("vehicle_status_inactive")}</button>
         <button class="chip ${currentFilter === 'unregistered' ? 'chip--active' : ''}" data-filter="unregistered">${t("vehicle_status_unregistered")}</button>
         <button class="chip ${currentFilter === 'archived' ? 'chip--active' : ''}" data-filter="archived">${t("vehicle_status_archived")}</button>
       </div>
@@ -215,6 +216,11 @@ function vehicleCard(v) {
           <span>👤</span> ${v.assignedDriverName}
         </div>
       ` : ""}
+      ${v.notes ? `
+        <div class="vehicle-card__notes">
+          <span>📝</span> ${v.notes}
+        </div>
+      ` : ""}
     </div>
   `;
 }
@@ -245,7 +251,9 @@ export async function openVehicleDetail(vehicleId, initialTab = "tech") {
     { key: "tech",        label: t("vehicle_tab_tech") },
     { key: "finance",     label: t("vehicle_tab_finance") },
     { key: "service",     label: t("vehicle_tab_service") },
+    { key: "incidents",   label: t("vehicle_tab_incidents") },
     { key: "assignments", label: t("vehicle_tab_assignments") },
+    { key: "notes",       label: t("vehicle_tab_notes") },
   ];
 
   const isMasterAdmin = S.profile?.role === "master_admin";
@@ -311,7 +319,9 @@ function renderVehicleTab(tab, vehicle) {
     case "tech":     content.innerHTML = renderTechTab(vehicle); break;
     case "finance":  content.innerHTML = renderFinanceTab(vehicle); break;
     case "service":    loadServiceTab(content, vehicle); break;
+    case "incidents":  loadIncidentsTab(content, vehicle); break;
     case "assignments": loadAssignmentsTab(content, vehicle); break;
+    case "notes":    content.innerHTML = renderNotesTab(vehicle); break;
   }
 }
 
@@ -348,6 +358,13 @@ function renderFinanceTab(v) {
     [t("vehicle_purchase_value"), v.purchaseValue ? Number(v.purchaseValue).toLocaleString() + " RSD" : null],
   ];
   return detailTable(rows);
+}
+
+function renderNotesTab(v) {
+  if (!v.notes) {
+    return `<div class="empty-state">${t("no_data")}</div>`;
+  }
+  return `<div class="vehicle-notes-box">${v.notes}</div>`;
 }
 
 async function loadServiceTab(container, vehicle) {
@@ -419,6 +436,93 @@ async function loadServiceTab(container, vehicle) {
   }
 }
 
+// ── TAB "PRIJAVE" (kvarovi/oštećenja/nezgode za ovo vozilo) ────
+async function loadIncidentsTab(container, vehicle) {
+  container.innerHTML = `<div class="loading">${t("loading")}</div>`;
+  const canEdit = S.profile?.role !== "driver" && !vehicle.archived;
+  try {
+    const snap = await getDocs(
+      query(
+        collection(db, "companies", S.companyId, "incidents"),
+        where("vehicleId", "==", vehicle.id),
+        orderBy("createdAt", "desc")
+      )
+    );
+    const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    container.innerHTML = items.length === 0
+      ? `<div class="empty-state"><div class="empty-state__icon">⚠️</div><p>${t("no_data")}</p></div>`
+      : `<div class="service-list">${items.map(i => vehicleIncidentItem(i, canEdit)).join("")}</div>`;
+
+    if (canEdit) {
+      container.querySelectorAll(".btn-schedule-service").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const inc = items.find(x => x.id === btn.dataset.id);
+          if (inc) openServiceForm(vehicle, null, incidentToServicePrefill(inc));
+        });
+      });
+    }
+  } catch (e) {
+    container.innerHTML = `<div class="error-state">${t("error")}: ${e.message}</div>`;
+  }
+}
+
+// Priprema početnih vrednosti za formu "Dodaj servis" na osnovu prijave
+// (ne tretira se kao edit — samo predpopunjava polja nove forme).
+function incidentToServicePrefill(inc) {
+  const typeLabels = {
+    fault:    t("incident_fault"),
+    damage:   t("incident_damage"),
+    accident: t("incident_accident"),
+    other:    t("incident_other"),
+  };
+  const prefix = typeLabels[inc.type] || inc.type;
+  return {
+    serviceType: inc.type === "other" ? "other" : "repair",
+    km:          inc.currentKm ?? null,
+    description: `${prefix}${inc.description ? ": " + inc.description : ""}`,
+  };
+}
+
+function vehicleIncidentItem(i, canEdit) {
+  const typeConfig = {
+    fault:    { icon: "🔧", label: t("incident_fault"),    color: "service" },
+    damage:   { icon: "💥", label: t("incident_damage"),   color: "broken" },
+    accident: { icon: "🚨", label: t("incident_accident"), color: "broken" },
+    other:    { icon: "📋", label: t("incident_other"),    color: "inactive" },
+  };
+  const cfg = typeConfig[i.type] || { icon: "📋", label: i.type, color: "inactive" };
+
+  const statusBadge = i.status === "open"
+    ? `<span class="badge badge--broken">🔴 ${t("incident_status_open")}</span>`
+    : i.status === "in_progress"
+      ? `<span class="badge badge--service">🟡 ${t("incident_status_in_progress")}</span>`
+      : `<span class="badge badge--active">🟢 ${t("incident_status_closed")}</span>`;
+
+  return `
+    <div class="service-item">
+      <div class="service-item__header">
+        <div class="service-item__badges">
+          <span class="badge badge--${cfg.color}">${cfg.icon} ${cfg.label}</span>
+          ${statusBadge}
+        </div>
+        <span class="service-item__date">${formatDate(i.createdAt)}</span>
+      </div>
+      ${i.description ? `<div class="service-item__desc">${i.description}</div>` : ""}
+      <div class="service-item__meta">
+        ${i.driverName ? `<span>👤 ${i.driverName}</span>` : ""}
+        ${i.currentKm ? `<span>🛣️ ${i.currentKm.toLocaleString()} km</span>` : ""}
+        ${i.location ? `<span>📍 ${i.location}</span>` : ""}
+      </div>
+      ${canEdit && i.status !== "closed" ? `
+        <div class="service-item__actions">
+          <button class="btn btn--secondary btn--sm btn-schedule-service" data-id="${i.id}">🔧 ${t("incident_schedule_service_btn")}</button>
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
 async function loadAssignmentsTab(container, vehicle) {
   container.innerHTML = `<div class="loading">${t("loading")}</div>`;
   try {
@@ -483,7 +587,8 @@ function openVehicleForm(vehicle = null) {
       </div>
       <div class="form-group">
         <label class="form-label">${t("vehicle_first_reg")}</label>
-        <input id="f-firstRegDate" class="form-input" type="date" value="${toDateInput(v.firstRegDate)}" />
+        <input id="f-firstRegDate" class="form-input" type="text" inputmode="numeric" maxlength="10"
+          placeholder="${datePlaceholder()}" value="${toDMY(v.firstRegDate)}" />
       </div>
     </div>
     <div class="form-row">
@@ -558,12 +663,14 @@ function openVehicleForm(vehicle = null) {
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">${t("vehicle_reg_expiry")}</label>
-        <input id="f-regExpiry" class="form-input" type="date" value="${toDateInput(v.regExpiry)}" />
+        <input id="f-regExpiry" class="form-input" type="text" inputmode="numeric" maxlength="10"
+          placeholder="${datePlaceholder()}" value="${toDMY(v.regExpiry)}" />
         <div id="f-reg-badge" style="margin-top:6px">${regBadge(v)}</div>
       </div>
       <div class="form-group">
         <label class="form-label">${t("vehicle_insurance_expiry")}</label>
-        <input id="f-insuranceExpiry" class="form-input" type="date" value="${toDateInput(v.insuranceExpiry)}" />
+        <input id="f-insuranceExpiry" class="form-input" type="text" inputmode="numeric" maxlength="10"
+          placeholder="${datePlaceholder()}" value="${toDMY(v.insuranceExpiry)}" />
       </div>
     </div>
     <div class="form-row">
@@ -581,7 +688,8 @@ function openVehicleForm(vehicle = null) {
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">${t("vehicle_purchase_date")}</label>
-        <input id="f-purchaseDate" class="form-input" type="date" value="${toDateInput(v.purchaseDate)}" />
+        <input id="f-purchaseDate" class="form-input" type="text" inputmode="numeric" maxlength="10"
+          placeholder="${datePlaceholder()}" value="${toDMY(v.purchaseDate)}" />
       </div>
       <div class="form-group">
         <label class="form-label">${t("vehicle_purchase_type")}</label>
@@ -607,12 +715,14 @@ function openVehicleForm(vehicle = null) {
 
   // Datum isteka registracije se kod nas poklapa sa datumom isteka osiguranja —
   // automatski se prepisuje, ali ostaje editabilno po potrebi.
+  ["f-firstRegDate", "f-regExpiry", "f-insuranceExpiry", "f-purchaseDate"].forEach(attachDateMask);
+
   document.getElementById("f-regExpiry")?.addEventListener("change", (e) => {
     const insuranceInput = document.getElementById("f-insuranceExpiry");
     if (insuranceInput) insuranceInput.value = e.target.value;
 
     const badgeDiv = document.getElementById("f-reg-badge");
-    if (badgeDiv) badgeDiv.innerHTML = regBadge({ regExpiry: e.target.value });
+    if (badgeDiv) badgeDiv.innerHTML = regBadge({ regExpiry: parseDMY(e.target.value) });
   });
 }
 
@@ -780,9 +890,9 @@ function confirmHardDeleteVehicle(vehicle) {
 }
 
 // ── SERVIS FORMA (dodavanje / editovanje) ────────────────────
-async function openServiceForm(vehicle, service = null) {
+async function openServiceForm(vehicle, service = null, prefill = null) {
   const isEdit = !!service;
-  const s = service || {};
+  const s = service || prefill || {};
   const servicers = await getServiceProviders();
 
   const bodyHTML = `
@@ -797,8 +907,8 @@ async function openServiceForm(vehicle, service = null) {
       </div>
       <div class="form-group">
         <label class="form-label">${t("service_date")} *</label>
-        <input id="sf-date" class="form-input" type="date"
-          value="${isEdit ? toDateInput(s.serviceDate) : new Date().toISOString().split("T")[0]}" />
+        <input id="sf-date" class="form-input" type="text" inputmode="numeric" maxlength="10" placeholder="${datePlaceholder()}"
+          value="${isEdit ? toDMY(s.serviceDate) : todayDMY()}" />
       </div>
     </div>
     ${!isEdit ? `
@@ -837,7 +947,8 @@ async function openServiceForm(vehicle, service = null) {
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">${t("service_end_date")}</label>
-        <input id="sf-endDate" class="form-input" type="date" value="${toDateInput(s.endDate)}" />
+        <input id="sf-endDate" class="form-input" type="text" inputmode="numeric" maxlength="10"
+          placeholder="${datePlaceholder()}" value="${toDMY(s.endDate)}" />
       </div>
       <div class="form-group">
         <label class="form-label">${t("service_end_km")}</label>
@@ -847,8 +958,8 @@ async function openServiceForm(vehicle, service = null) {
   `;
 
   openModal(isEdit ? `${t("edit")}: ${t("service_type_" + s.serviceType) || s.serviceType}` : t("service_add"), bodyHTML, async () => {
-    const dateVal = document.getElementById("sf-date")?.value;
-    if (!dateVal) return;
+    const serviceDateVal = dateOrNull("sf-date");
+    if (!serviceDateVal) return;
     try {
       const selectedId = document.getElementById("sf-workshop-select")?.value || "";
       let workshop = null;
@@ -865,7 +976,7 @@ async function openServiceForm(vehicle, service = null) {
         vehicleId:    vehicle.id,
         vehiclePlate: vehicle.plate,
         serviceType:  document.getElementById("sf-type")?.value,
-        serviceDate:  new Date(dateVal),
+        serviceDate:  serviceDateVal,
         km:           numOrNull("sf-km"),
         cost:         numOrNull("sf-cost"),
         workshop,
@@ -900,6 +1011,8 @@ async function openServiceForm(vehicle, service = null) {
       showToast(`${t("error")}: ${e.message}`, "error");
     }
   });
+
+  ["sf-date", "sf-endDate"].forEach(attachDateMask);
 
   // Prikaži slobodno polje samo kad je izabrano "Drugo"
   document.getElementById("sf-workshop-select")?.addEventListener("change", (e) => {
@@ -943,7 +1056,8 @@ function openCompleteServiceModal(vehicle, service) {
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">${t("service_end_date")}</label>
-        <input id="cs-endDate" class="form-input" type="date" value="${new Date().toISOString().split("T")[0]}" />
+        <input id="cs-endDate" class="form-input" type="text" inputmode="numeric" maxlength="10"
+          placeholder="${datePlaceholder()}" value="${todayDMY()}" />
       </div>
       <div class="form-group">
         <label class="form-label">${t("service_end_km")}</label>
@@ -977,6 +1091,8 @@ function openCompleteServiceModal(vehicle, service) {
       showToast(`${t("error")}: ${e.message}`, "error");
     }
   });
+
+  attachDateMask("cs-endDate");
 }
 
 // ── OTKAZIVANJE SERVISA ───────────────────────────────────────
@@ -1131,11 +1247,56 @@ function formatDate(val) {
   return isNaN(d) ? "—" : d.toLocaleDateString(locale);
 }
 
-function toDateInput(val) {
+// ── DATUMI: prikaz i unos u lokalnom formatu dd/mm/yyyy ──────
+// Napomena: <input type="date"> prikazuje kalendar/datum u formatu koji
+// zavisi od jezika/regije PODEŠENE U BROWSERU/OS-u korisnika (mm/dd/yyyy
+// za en-US, dd/mm/yyyy za sr-RS, itd.) — to nije nešto što aplikacija može
+// da promeni preko HTML/CSS/JS za taj input tip. Zato ovde koristimo obično
+// tekstualno polje sa maskom, tako da je format uvek dd/mm/yyyy za sve
+// korisnike, nezavisno od podešavanja njihovog browsera.
+
+function toDMY(val) {
   if (!val) return "";
   const d = val.toDate ? val.toDate() : new Date(val);
   if (isNaN(d)) return "";
-  return d.toISOString().split("T")[0];
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${dd}/${mm}/${d.getFullYear()}`;
+}
+
+function todayDMY() {
+  return toDMY(new Date());
+}
+
+// Placeholder prati jezik aplikacije (dd/mm ostaje fiksno — poslovno
+// pravilo firme — menja se samo naziv za "godinu": yyyy (en) / gggg (sr)).
+function datePlaceholder() {
+  return getCurrentLang() === "en" ? "dd/mm/yyyy" : "dd/mm/gggg";
+}
+
+// Parsira "dd/mm/yyyy" u Date objekat (lokalno vreme, ponoć). Vraća null
+// ako string nije kompletan ili predstavlja nepostojeći datum (npr. 31/02).
+function parseDMY(str) {
+  if (!str) return null;
+  const m = str.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return null;
+  const day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
+  const d = new Date(year, month - 1, day);
+  if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return null;
+  return d;
+}
+
+// Auto-formatiranje dok korisnik kuca: cifre se same grupišu u dd/mm/yyyy.
+function attachDateMask(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener("input", () => {
+    const digits = el.value.replace(/\D/g, "").slice(0, 8);
+    let out = digits;
+    if (digits.length > 4) out = `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+    else if (digits.length > 2) out = `${digits.slice(0, 2)}/${digits.slice(2)}`;
+    el.value = out;
+  });
 }
 
 function numOrNull(id) {
@@ -1145,5 +1306,5 @@ function numOrNull(id) {
 
 function dateOrNull(id) {
   const val = document.getElementById(id)?.value;
-  return val ? new Date(val) : null;
+  return val ? parseDMY(val) : null;
 }

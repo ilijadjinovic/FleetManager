@@ -223,10 +223,8 @@ async function openAssignmentForm(existing = null) {
   // Aktivni vozači
   const activeDrivers = allDrivers.filter(d => d.active !== false);
 
-  const today = new Date().toISOString().split("T")[0];
-
   const bodyHTML = `
-    <div class="form-section-title">Vozilo i vozač</div>
+    <div class="form-section-title">${t("assignment_form_section_vehicle_driver")}</div>
 
     <div class="form-group">
       <label class="form-label">${t("assignment_vehicle")} *</label>
@@ -254,19 +252,19 @@ async function openAssignmentForm(existing = null) {
       </div>
     </div>
 
-    <div class="form-section-title" style="margin-top:4px">Period i tip puta</div>
+    <div class="form-section-title" style="margin-top:4px">${t("assignment_form_section_period")}</div>
 
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">${t("assignment_start_date")} *</label>
-        <input id="af-startDate" class="form-input" type="date"
-          value="${isEdit ? toDateInput(a.startDate) : today}" />
+        <input id="af-startDate" class="form-input" type="text" inputmode="numeric" maxlength="10"
+          placeholder="${datePlaceholder()}" value="${isEdit ? toDMY(a.startDate) : todayDMY()}" />
       </div>
       <div class="form-group">
         <label class="form-label">${t("assignment_end_date")}</label>
-        <input id="af-endDate" class="form-input" type="date"
-          value="${isEdit ? toDateInput(a.endDate) : ""}" />
-        <span class="form-hint">Ostavite prazno za neodređeno trajanje</span>
+        <input id="af-endDate" class="form-input" type="text" inputmode="numeric" maxlength="10"
+          placeholder="${datePlaceholder()}" value="${isEdit ? toDMY(a.endDate) : ""}" />
+        <span class="form-hint">${t("assignment_end_date_hint")}</span>
       </div>
     </div>
 
@@ -274,7 +272,7 @@ async function openAssignmentForm(existing = null) {
       <label class="form-label">${t("assignment_start_km")}</label>
       <input id="af-startKm" class="form-input" type="number"
         value="${a.startKm || ""}"
-        placeholder="Popunjava se automatski iz kartice vozila" />
+        placeholder="${t('assignment_start_km_placeholder')}" />
     </div>
 
     <div class="form-group">
@@ -361,6 +359,9 @@ async function openAssignmentForm(existing = null) {
       }
     });
   });
+
+  attachDateMask("af-startDate");
+  attachDateMask("af-endDate");
 }
 
 // ── INFO BOX O VOZILU ─────────────────────────────────────────
@@ -466,9 +467,11 @@ async function saveAssignment(assignmentId, existing) {
   const vehicle = allVehicles.find(v => v.id === vehicleId);
   const driver  = allDrivers.find(d => d.id === driverId);
 
-  const startDateObj = new Date(startDate);
-  const endDateObj   = endDate ? new Date(endDate) : null;
+  const startDateObj = parseDMY(startDate);
+  const endDateObj   = endDate ? parseDMY(endDate) : null;
 
+  if (!startDateObj) { showAssignError(t("assignment_no_date")); return; }
+  if (endDate && !endDateObj) { showAssignError(t("required_field")); return; }
   if (endDateObj && endDateObj <= startDateObj) {
     showAssignError(t("required_field"));
     return;
@@ -504,7 +507,7 @@ async function saveAssignment(assignmentId, existing) {
           status:  "closed",
           endDate: closeDate,
           endKm:   null,
-          closedReason: `Automatski zatvoreno — novo zaduženje (${driver.firstName} ${driver.lastName})`,
+          closedReason: `${t("assignment_auto_closed_reason_label")} (${driver.firstName} ${driver.lastName})`,
           updatedAt: serverTimestamp(),
         });
         break;
@@ -588,11 +591,11 @@ function showConflictDialog(existingAssignment, newDriver, suggestedCloseDate) {
       const bodyHTML = `
         <div class="conflict-dialog">
           <div class="conflict-dialog__icon">⚠️</div>
-          <p>Vozilo je trenutno zaduženo:</p>
+          <p>${t("assignment_conflict_vehicle_busy")}</p>
           <div class="conflict-info">
             <strong>👤 ${existingAssignment.driverName}</strong>
             <span>od ${formatDate(existingAssignment.startDate)}</span>
-            <span class="badge badge--warning">Bez datuma završetka</span>
+            <span class="badge badge--warning">${t("assignment_conflict_no_end_date_badge")}</span>
           </div>
           <p>Da biste zadužili vozilo vozaču
             <strong>${newDriver.firstName} ${newDriver.lastName}</strong>,
@@ -600,8 +603,8 @@ function showConflictDialog(existingAssignment, newDriver, suggestedCloseDate) {
           </p>
           <div class="form-group" style="margin-top:12px">
             <label class="form-label">${t("assignment_conflict_close_date")}</label>
-            <input id="conflict-close-date" class="form-input" type="date"
-              value="${suggestedCloseDate.toISOString().split("T")[0]}" />
+            <input id="conflict-close-date" class="form-input" type="text" inputmode="numeric" maxlength="10"
+              placeholder="${datePlaceholder()}" value="${toDMY(suggestedCloseDate)}" />
             <span class="form-hint">${t("assignment_conflict_close_hint")}</span>
           </div>
         </div>
@@ -611,8 +614,9 @@ function showConflictDialog(existingAssignment, newDriver, suggestedCloseDate) {
         openModal(t("assignment_conflict_title"), bodyHTML, () => {
           // Ažuriraj datum zatvaranja iz inputa
           const dateInput = document.getElementById("conflict-close-date");
-          if (dateInput?.value) {
-            suggestedCloseDate.setTime(new Date(dateInput.value).getTime());
+          const parsed = dateInput?.value ? parseDMY(dateInput.value) : null;
+          if (parsed) {
+            suggestedCloseDate.setTime(parsed.getTime());
           }
           resolve(true);
         });
@@ -623,6 +627,7 @@ function showConflictDialog(existingAssignment, newDriver, suggestedCloseDate) {
           resolve(false);
         };
         document.getElementById("modal-confirm").textContent = t("assignment_conflict_close_btn");
+        attachDateMask("conflict-close-date");
       });
     }, 150);
   });
@@ -631,22 +636,22 @@ function showConflictDialog(existingAssignment, newDriver, suggestedCloseDate) {
 // ── FORMA ZA RAZDUŽENJE ───────────────────────────────────────
 function openUnassignForm(assignment) {
   const vehicle = allVehicles.find(v => v.id === assignment.vehicleId);
-  const today   = new Date().toISOString().split("T")[0];
 
   const bodyHTML = `
     <div class="unassign-info">
       <div>🚗 <strong>${assignment.vehicleBrand} ${assignment.vehicleModel}</strong> — ${assignment.vehiclePlate}</div>
       <div>👤 ${assignment.driverName}</div>
-      <div>📅 Zaduženo: ${formatDate(assignment.startDate)}</div>
-      ${assignment.startKm ? `<div>🛣️ Početna km: ${assignment.startKm.toLocaleString()}</div>` : ""}
+      <div>📅 ${t("trip_assigned_label")}: ${formatDate(assignment.startDate)}</div>
+      ${assignment.startKm ? `<div>🛣️ ${t("assignment_start_km")}: ${assignment.startKm.toLocaleString()}</div>` : ""}
     </div>
 
-    <div class="form-section-title" style="margin-top:12px">Razduženje</div>
+    <div class="form-section-title" style="margin-top:12px">${t("assignment_unassign_title")}</div>
 
     <div class="form-row">
       <div class="form-group">
-        <label class="form-label">Datum razduženja *</label>
-        <input id="ua-endDate" class="form-input" type="date" value="${today}" />
+        <label class="form-label">${t("assignment_unassign_date_label")}</label>
+        <input id="ua-endDate" class="form-input" type="text" inputmode="numeric" maxlength="10"
+          placeholder="${datePlaceholder()}" value="${todayDMY()}" />
       </div>
       <div class="form-group">
         <label class="form-label">${t("assignment_end_km")}</label>
@@ -658,7 +663,7 @@ function openUnassignForm(assignment) {
 
     <div class="form-group">
       <label class="form-label">${t("notes")}</label>
-      <textarea id="ua-notes" class="form-textarea" placeholder="Napomena o razduženju..."></textarea>
+      <textarea id="ua-notes" class="form-textarea" placeholder="${t('assignment_unassign_notes_ph')}"></textarea>
     </div>
 
     <p id="unassign-error" class="login-error hidden"></p>
@@ -669,6 +674,8 @@ function openUnassignForm(assignment) {
     bodyHTML,
     () => processUnassign(assignment)
   );
+
+  attachDateMask("ua-endDate");
 }
 
 async function processUnassign(assignment) {
@@ -682,7 +689,12 @@ async function processUnassign(assignment) {
     return;
   }
 
-  const endDateObj = new Date(endDate);
+  const endDateObj = parseDMY(endDate);
+  if (!endDateObj) {
+    const err = document.getElementById("unassign-error");
+    if (err) { err.textContent = t("assignment_unassign_date_required"); err.classList.remove("hidden"); }
+    return;
+  }
   const startDate  = assignment.startDate?.toDate
     ? assignment.startDate.toDate()
     : new Date(assignment.startDate);
@@ -733,10 +745,49 @@ function formatDate(val) {
   return isNaN(d) ? "—" : d.toLocaleDateString(locale);
 }
 
-function toDateInput(val) {
+// ── DATUMI: prikaz i unos u lokalnom formatu dd/mm/yyyy ──────
+// <input type="date"> prikazuje kalendar u formatu koji zavisi od
+// jezika/regije podešene u browseru korisnika, ne od jezika aplikacije,
+// pa koristimo tekstualno polje sa maskom umesto toga.
+function toDMY(val) {
   if (!val) return "";
   const d = val.toDate ? val.toDate() : new Date(val);
-  return isNaN(d) ? "" : d.toISOString().split("T")[0];
+  if (isNaN(d)) return "";
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${dd}/${mm}/${d.getFullYear()}`;
+}
+
+function todayDMY() {
+  return toDMY(new Date());
+}
+
+// Placeholder prati jezik aplikacije (dd/mm ostaje fiksno — poslovno
+// pravilo firme — menja se samo naziv za "godinu": yyyy (en) / gggg (sr)).
+function datePlaceholder() {
+  return getCurrentLang() === "en" ? "dd/mm/yyyy" : "dd/mm/gggg";
+}
+
+function parseDMY(str) {
+  if (!str) return null;
+  const m = String(str).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (!m) return null;
+  const day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
+  const d = new Date(year, month - 1, day);
+  if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return null;
+  return d;
+}
+
+function attachDateMask(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener("input", () => {
+    const digits = el.value.replace(/\D/g, "").slice(0, 8);
+    let out = digits;
+    if (digits.length > 4) out = `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
+    else if (digits.length > 2) out = `${digits.slice(0, 2)}/${digits.slice(2)}`;
+    el.value = out;
+  });
 }
 
 function showAssignError(msg) {

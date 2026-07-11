@@ -7,7 +7,7 @@
 
 import { db } from "./firebase.js";
 import {
-  collection, query, orderBy, getDocs, doc,
+  collection, query, orderBy, getDocs, doc, getDoc,
   addDoc, updateDoc, serverTimestamp, where
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { t, getCurrentLang } from "./i18n.js";
@@ -18,6 +18,7 @@ let allIncidents  = [];
 let filterType    = "all";
 let filterStatus  = "all";
 let searchTerm    = "";
+let onSavedCallback = null; // opcioni hook — poziva se posle uspešnog snimanja (npr. iz trips.js)
 
 // ── GLAVNI RENDER ─────────────────────────────────────────────
 export async function renderIncidents(container) {
@@ -29,11 +30,18 @@ export async function renderIncidents(container) {
   const isDriver = S.profile?.role === "driver";
   const canEdit  = !isDriver;
 
+  // Vozač sme da prijavi samo u okviru trenutnog aktivnog zaduženja
+  const hasActiveAssignment = isDriver ? await driverHasActiveAssignment() : false;
+  const canReport = isDriver && hasActiveAssignment;
+
   container.innerHTML = `
     <div class="page-header">
       <h2 class="page-title">${t("tab_report")}</h2>
-      ${isDriver ? `<button id="btn-add-incident" class="btn btn--warning btn--sm">⚠️ ${t("incident_add")}</button>` : ""}
+      ${canReport ? `<button id="btn-add-incident" class="btn btn--warning btn--sm">⚠️ ${t("incident_add")}</button>` : ""}
     </div>
+    ${isDriver && !hasActiveAssignment ? `
+      <div class="no-login-notice" style="margin-bottom:12px">⚠️ ${t("incident_no_assignment_notice")}</div>
+    ` : ""}
 
     <div class="filter-bar">
       <div class="search-bar">
@@ -235,8 +243,50 @@ function incidentCard(inc, canEdit) {
   `;
 }
 
+// ── DA LI VOZAČ IMA AKTIVNO ZADUŽENJE ──────────────────────────
+async function driverHasActiveAssignment() {
+  try {
+    const snap = await getDocs(query(
+      collection(db, "companies", S.companyId, "assignments"),
+      where("driverUid", "==", S.user.uid),
+      where("status", "==", "active")
+    ));
+    return !snap.empty;
+  } catch (e) {
+    console.error("driverHasActiveAssignment error:", e);
+    return false;
+  }
+}
+
 // ── FORMA ZA NOVU PRIJAVU ─────────────────────────────────────
-function openIncidentForm(prefillType = null) {
+// prefillType: unapred izabran tip (npr. kad se poziva sa dugmeta "⚠️" u Mojim vožnjama)
+// onSaved:     opciona callback funkcija — poziva se posle uspešnog snimanja
+//              (koristi je npr. trips.js da osveži svoju listu unosa)
+export async function openIncidentForm(prefillType = null, onSaved = null) {
+  onSavedCallback = onSaved;
+
+  // Predpopuni km polje trenutnom km vozila (ako vozač ima aktivno zaduženje)
+  let prefillCurrentKm = null;
+  if (S.profile?.role === "driver") {
+    try {
+      const assignSnap = await getDocs(query(
+        collection(db, "companies", S.companyId, "assignments"),
+        where("driverUid", "==", S.user.uid),
+        where("status", "==", "active")
+      ));
+      if (!assignSnap.empty) {
+        const a = assignSnap.docs[0].data();
+        prefillCurrentKm = a.startKm ?? null;
+        if (a.vehicleId) {
+          const vehSnap = await getDoc(doc(db, "companies", S.companyId, "vehicles", a.vehicleId));
+          if (vehSnap.exists() && vehSnap.data().currentKm != null) {
+            prefillCurrentKm = vehSnap.data().currentKm;
+          }
+        }
+      }
+    } catch (e) { /* ignoriši — polje ostaje prazno, vozač unosi ručno */ }
+  }
+
   const bodyHTML = `
     <div class="form-section-title">${t("incident_type")}</div>
     <div class="incident-type-grid">
@@ -279,8 +329,9 @@ function openIncidentForm(prefillType = null) {
           placeholder="${t('incident_location_ph')}" />
       </div>
       <div class="form-group">
-        <label class="form-label">Km pri prijavi</label>
-        <input id="inc-km" class="form-input" type="number" />
+        <label class="form-label">${t("trip_current_km")} *</label>
+        <input id="inc-km" class="form-input" type="number"
+          value="${prefillCurrentKm || ""}" placeholder="${t('trip_current_km')}" />
       </div>
     </div>
 
@@ -339,8 +390,8 @@ async function saveIncident() {
     return;
   }
 
-  // Dohvati aktivno zaduženje vozača
-  let vehiclePlate = null, vehicleId = null, assignmentId = null, driverId = null;
+  // Dohvati aktivno zaduženje vozača (i vozilo, radi validacije km)
+  let vehiclePlate = null, vehicleId = null, assignmentId = null, driverId = null, vehicleCurrentKm = null, assignmentStartKm = null;
 
   if (S.profile?.role === "driver") {
     try {
@@ -351,19 +402,46 @@ async function saveIncident() {
       ));
       if (!assignSnap.empty) {
         const a = assignSnap.docs[0].data();
-        vehiclePlate = a.vehiclePlate;
-        vehicleId    = a.vehicleId;
-        assignmentId = assignSnap.docs[0].id;
+        vehiclePlate     = a.vehiclePlate;
+        vehicleId        = a.vehicleId;
+        assignmentId     = assignSnap.docs[0].id;
+        assignmentStartKm = a.startKm ?? null;
+
+        if (vehicleId) {
+          const vehSnap = await getDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId));
+          if (vehSnap.exists()) vehicleCurrentKm = vehSnap.data().currentKm ?? null;
+        }
       }
       driverId = S.profile.driverId;
     } catch (e) { /* ignoriši */ }
+
+    if (!assignmentId) {
+      const err = document.getElementById("incident-form-error");
+      if (err) { err.textContent = t("incident_no_assignment_notice"); err.classList.remove("hidden"); }
+      return;
+    }
+  }
+
+  // Km je obavezna; ako imamo referentnu vrednost (vozilo/zaduženje), ne sme biti manja od nje
+  const kmRaw = document.getElementById("inc-km")?.value;
+  const currentKm = parseFloat(kmRaw);
+  if (!kmRaw || isNaN(currentKm) || currentKm <= 0) {
+    const err = document.getElementById("incident-form-error");
+    if (err) { err.textContent = t("required_field") + ": " + t("trip_current_km"); err.classList.remove("hidden"); }
+    return;
+  }
+  const lastKm = vehicleCurrentKm ?? assignmentStartKm;
+  if (lastKm != null && currentKm < lastKm) {
+    const err = document.getElementById("incident-form-error");
+    if (err) { err.textContent = `${t("trip_km_too_low")}: ${lastKm.toLocaleString()} km`; err.classList.remove("hidden"); }
+    return;
   }
 
   const data = {
     type,
     description,
     location:     document.getElementById("inc-location")?.value.trim() || null,
-    currentKm:    parseFloat(document.getElementById("inc-km")?.value) || null,
+    currentKm,
     vehicleId,
     vehiclePlate,
     assignmentId,
@@ -382,7 +460,22 @@ async function saveIncident() {
   };
 
   try {
-    await addDoc(collection(db, "companies", S.companyId, "incidents"), data);
+    const writes = [addDoc(collection(db, "companies", S.companyId, "incidents"), data)];
+
+    // Ako postoji aktivno zaduženje, prijava se vidi i u "Mojim vožnjama" (tripEntries)
+    if (assignmentId) {
+      writes.push(addDoc(collection(db, "companies", S.companyId, "tripEntries"), data));
+    }
+
+    await Promise.all(writes);
+
+    // Ažuriraj km vozila na osnovu prijave
+    if (vehicleId) {
+      await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId), {
+        currentKm: currentKm,
+        updatedAt: serverTimestamp(),
+      });
+    }
 
     // Notifikacija fleet adminu
     await addDoc(collection(db, "companies", S.companyId, "notifications"), {
@@ -396,7 +489,15 @@ async function saveIncident() {
     });
 
     showToast(t("incident_sent"), "success");
-    await loadIncidents();
+
+    // Osveži listu prijava samo ako je trenutno na ekranu (npr. ne kad se
+    // forma otvori iz "Mojih vožnji")
+    if (document.getElementById("incidents-list")) {
+      await loadIncidents();
+    }
+
+    if (typeof onSavedCallback === "function") await onSavedCallback();
+    onSavedCallback = null;
   } catch (e) {
     const err = document.getElementById("incident-form-error");
     if (err) { err.textContent = `${t("error")}: ${e.message}`; err.classList.remove("hidden"); }
