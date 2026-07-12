@@ -22,6 +22,7 @@ import { tripEntryCard } from "./trips.js";
 // prijave, potvrdu kilometraže i razduženje)
 let activeAssignment = null;
 let activeVehicle    = null;
+let activeTrip        = null;
 let tripEntries       = [];
 
 export async function renderDashboard(container) {
@@ -247,8 +248,17 @@ async function loadDashboardData() {
 
     const isDriver = role === "driver";
 
+    // Vozač: pronađi/otvori aktivnu vožnju u okviru aktivnog zaduženja
+    let resolvedActiveTrip = null;
+    if (isDriver) {
+      const candidate = assignmentsSnap?.docs?.[0];
+      if (candidate) {
+        resolvedActiveTrip = await loadActiveTrip({ id: candidate.id, ...candidate.data() });
+      }
+    }
+
     content.innerHTML = `
-      ${isDriver ? renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSnap, vehicles) : renderAdminDashboard({
+      ${isDriver ? renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSnap, vehicles, resolvedActiveTrip) : renderAdminDashboard({
         total, active, inService, unregistered, broken, inactive, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount
       })}
     `;
@@ -377,19 +387,55 @@ function renderAdminDashboard({ total, active, inService, unregistered, broken, 
   `;
 }
 
-function renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSnap, vehicles) {
+// ── AKTIVNA VOŽNJA UNUTAR ZADUŽENJA ────────────────────────────
+// Pronalazi trenutno aktivnu vožnju za dato zaduženje. Ako je nema
+// (npr. zaduženje kreirano pre uvođenja koncepta "vožnji"), otvara je
+// na licu mesta na osnovu podataka sa samog zaduženja, da bi sve
+// dalje (unosi, zatvaranje) imalo na šta da se veže.
+async function loadActiveTrip(assignment) {
+  if (!assignment) return null;
+  try {
+    const snap = await getDocs(query(
+      collection(db, "companies", S.companyId, "trips"),
+      where("assignmentId", "==", assignment.id),
+      where("status", "==", "active")
+    ));
+    if (!snap.empty) return { id: snap.docs[0].id, ...snap.docs[0].data() };
+
+    const tripData = {
+      assignmentId: assignment.id,
+      vehicleId:    assignment.vehicleId,
+      vehicleBrand: assignment.vehicleBrand,
+      vehicleModel: assignment.vehicleModel,
+      vehiclePlate: assignment.vehiclePlate,
+      vehicleVin:   assignment.vehicleVin || null,
+      driverId:     assignment.driverId,
+      driverName:   assignment.driverName,
+      driverUid:    assignment.driverUid || S.user.uid,
+      startDate:    assignment.startDate,
+      endDate:      null,
+      startKm:      assignment.startKm ?? null,
+      endKm:        null,
+      tripType:     assignment.tripType || "local",
+      destination:  assignment.destination || null,
+      route:        assignment.route || null,
+      reason:       assignment.reason || null,
+      status:       "active",
+      notes:        null,
+      createdAt:    serverTimestamp(),
+      createdBy:    S.user.uid,
+    };
+    const ref = await addDoc(collection(db, "companies", S.companyId, "trips"), tripData);
+    return { id: ref.id, ...tripData };
+  } catch (e) {
+    console.error("loadActiveTrip error:", e);
+    return null;
+  }
+}
+
+function renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSnap, vehicles, resolvedActiveTrip) {
   const activeAssignments = assignmentsSnap?.docs?.map(d => ({ id: d.id, ...d.data() })) || [];
   const allEntries        = allEntriesSnap?.docs?.map(d => ({ id: d.id, ...d.data() })) || [];
-
-  // Grupiši sve unose po zaduženju (jedan upit, lokalno grupisanje)
-  const entriesByAssignment = {};
-  allEntries.forEach(e => {
-    if (!e.assignmentId) return;
-    (entriesByAssignment[e.assignmentId] ||= []).push(e);
-  });
-  // Upit je učitan rastuće po datumu (radi ponovne upotrebe postojećeg
-  // indeksa) — okreni svaku grupu da bude najnovije prvo, radi prikaza.
-  Object.values(entriesByAssignment).forEach(list => list.reverse());
 
   // Vozač u praksi ima najviše jedno aktivno zaduženje — koristimo prvo
   // i pamtimo ga u stanju modula radi akcija (dodavanje unosa, km potvrda,
@@ -397,6 +443,7 @@ function renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSn
   if (activeAssignments.length === 0) {
     activeAssignment = null;
     activeVehicle    = null;
+    activeTrip       = null;
     tripEntries       = [];
     return `
       <div class="empty-state">
@@ -409,19 +456,31 @@ function renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSn
 
   activeAssignment = activeAssignments[0];
   activeVehicle    = vehicles?.find(v => v.id === activeAssignment.vehicleId) || null;
-  tripEntries       = entriesByAssignment[activeAssignment.id] || [];
+  activeTrip       = resolvedActiveTrip;
 
-  return renderActiveAssignmentBlock(activeAssignment, tripEntries, activeVehicle);
+  // Unosi tokom TRENUTNE vožnje (po tripId). Stariji unosi bez tripId
+  // (nastali pre uvođenja vožnji) i dalje se prikazuju uz trenutnu
+  // vožnju, da se ne bi "izgubili" iz prikaza.
+  tripEntries = activeTrip
+    ? allEntries.filter(e => e.assignmentId === activeAssignment.id && (e.tripId === activeTrip.id || !e.tripId))
+    : allEntries.filter(e => e.assignmentId === activeAssignment.id);
+
+  return renderActiveAssignmentBlock(activeAssignment, activeTrip, tripEntries, activeVehicle);
 }
 
 // ── AKTIVNO ZADUŽENJE: kartica vozila, km potvrda, statistike,
 //    akcije i lista unosa tokom vožnje ──────────────────────────
-function renderActiveAssignmentBlock(a, entries, v) {
+function renderActiveAssignmentBlock(a, trip, entries, v) {
   const totalFuel     = entries.filter(e => e.type === "fuel").reduce((s, e) => s + (e.fuelAmount || 0), 0);
   const totalFuelCost = entries.filter(e => e.type === "fuel").reduce((s, e) => s + (e.fuelCost || 0), 0);
   const totalTolls    = entries.filter(e => e.type === "toll").reduce((s, e) => s + (e.amount || 0), 0);
   const totalOther    = entries.filter(e => e.type === "other_cost").reduce((s, e) => s + (e.amount || 0), 0);
   const incidents     = entries.filter(e => ["fault", "damage", "accident"].includes(e.type));
+
+  const tripType     = trip?.tripType ?? a.tripType;
+  const destination  = trip?.destination ?? a.destination;
+  const reason       = trip?.reason ?? a.reason;
+  const startKm      = trip?.startKm ?? a.startKm;
 
   return `
     <!-- HEADER VOZILA -->
@@ -442,19 +501,23 @@ function renderActiveAssignmentBlock(a, entries, v) {
           <span>${formatDate(a.startDate)}</span>
         </div>
         <div class="trip-vehicle-detail">
-          <span class="trip-vehicle-detail__label">${t("trip_start_km_label")}</span>
-          <span><strong>${a.startKm?.toLocaleString() || "—"} km</strong></span>
+          <span class="trip-vehicle-detail__label">${t("trip_current_trip_since_label")}</span>
+          <span>${trip ? formatDate(trip.startDate) : "—"}</span>
         </div>
-        ${a.tripType === "intercity" ? `
+        <div class="trip-vehicle-detail">
+          <span class="trip-vehicle-detail__label">${t("trip_start_km_label")}</span>
+          <span><strong>${startKm?.toLocaleString() || "—"} km</strong></span>
+        </div>
+        ${tripType === "intercity" ? `
         <div class="trip-vehicle-detail">
           <span class="trip-vehicle-detail__label">${t("trip_destination_label")}</span>
-          <span>📍 ${a.destination || "—"}</span>
+          <span>📍 ${destination || "—"}</span>
         </div>
         ` : ""}
-        ${a.reason ? `
+        ${reason ? `
         <div class="trip-vehicle-detail">
           <span class="trip-vehicle-detail__label">${t("trip_reason_label")}</span>
-          <span>${a.reason}</span>
+          <span>${reason}</span>
         </div>
         ` : ""}
       </div>
@@ -465,7 +528,7 @@ function renderActiveAssignmentBlock(a, entries, v) {
       </div>
     </div>
 
-    <!-- STATISTIKE -->
+    <!-- STATISTIKE (za TRENUTNU vožnju) -->
     <div class="trip-stats">
       <div class="trip-stat-box">
         <div class="trip-stat-box__value">${totalFuel.toFixed(1)} L</div>
@@ -490,10 +553,11 @@ function renderActiveAssignmentBlock(a, entries, v) {
       <button class="btn btn--primary" id="btn-add-fuel">⛽ ${t("trip_fuel_btn")}</button>
       <button class="btn btn--secondary" id="btn-add-toll">🛣️ ${t("trip_cost_btn")}</button>
       <button class="btn btn--warning" id="btn-add-incident">⚠️ ${t("trip_incident_btn")}</button>
-      <button class="btn btn--danger" id="btn-unassign">🔓 ${t("trip_unassign_btn")}</button>
+      <button class="btn btn--secondary" id="btn-close-trip">🔁 ${t("trip_close_trip_btn")}</button>
+      <button class="btn btn--danger" id="btn-close-assignment">🔓 ${t("trip_close_assignment_btn")}</button>
     </div>
 
-    <!-- LISTA UNOSA -->
+    <!-- LISTA UNOSA (tokom trenutne vožnje) -->
     <div class="trip-entries-header">
       <h3>${t("trip_entries_header")}</h3>
     </div>
@@ -506,15 +570,17 @@ function renderActiveAssignmentBlock(a, entries, v) {
   `;
 }
 
-// Bind-uje akcije aktivnog zaduženja (km potvrda, dugmad za unos i razduženje)
-// — poziva se posle upisa u DOM, samo ako postoji aktivno zaduženje.
+// Bind-uje akcije aktivnog zaduženja (km potvrda, dugmad za unos, zatvaranje
+// vožnje/zaduženja) — poziva se posle upisa u DOM, samo ako postoji
+// aktivno zaduženje.
 function attachDriverActiveAssignmentEvents() {
   if (!activeAssignment) return;
   bindKmConfirm();
   document.getElementById("btn-add-fuel")?.addEventListener("click", () => openFuelForm());
   document.getElementById("btn-add-toll")?.addEventListener("click", () => openCostForm());
   document.getElementById("btn-add-incident")?.addEventListener("click", () => openIncidentForm(null, refreshEntries));
-  document.getElementById("btn-unassign")?.addEventListener("click", () => openDriverUnassignForm());
+  document.getElementById("btn-close-trip")?.addEventListener("click", () => openCloseTripForm());
+  document.getElementById("btn-close-assignment")?.addEventListener("click", () => openDriverUnassignForm());
 }
 
 // ── KM POTVRDA — sadržaj boksa (potvrđeno vs. forma) ───────────
@@ -671,6 +737,166 @@ function bindKmConfirm() {
   });
 }
 
+// ── ZATVARANJE VOŽNJE (bez zatvaranja celog zaduženja) ─────────
+function openCloseTripForm() {
+  const bodyHTML = `
+    <div class="unassign-info">
+      <div>🚗 <strong>${activeAssignment.vehicleBrand} ${activeAssignment.vehicleModel}</strong> — ${activeAssignment.vehiclePlate}</div>
+      ${activeTrip?.destination ? `<div>📍 ${activeTrip.destination}</div>` : ""}
+      <div>🛣️ ${t("assignment_start_km")}: ${(activeTrip?.startKm ?? activeAssignment.startKm)?.toLocaleString() || "—"}</div>
+    </div>
+
+    <div class="form-section-title" style="margin-top:12px">${t("trip_close_trip_title")}</div>
+    <div class="form-group">
+      <label class="form-label">${t("assignment_end_km")} *</label>
+      <input id="ct-endKm" class="form-input" type="number"
+        value="${activeVehicle?.currentKm || ""}" />
+    </div>
+    <div class="form-group">
+      <label class="form-label">${t("notes")}</label>
+      <textarea id="ct-notes" class="form-textarea" rows="2"></textarea>
+    </div>
+    <p id="close-trip-error" class="login-error hidden"></p>
+  `;
+
+  openModal(t("trip_close_trip_btn"), bodyHTML, () => closeCurrentTrip());
+}
+
+async function closeCurrentTrip() {
+  if (!activeTrip) return false;
+
+  const endKm = validateKmInput(document.getElementById("ct-endKm")?.value, "close-trip-error");
+  if (endKm === null) return false;
+  const notes = document.getElementById("ct-notes")?.value.trim() || null;
+
+  try {
+    await updateDoc(doc(db, "companies", S.companyId, "trips", activeTrip.id), {
+      status:    "closed",
+      endDate:   serverTimestamp(),
+      endKm,
+      notes,
+      updatedAt: serverTimestamp(),
+    });
+    await bumpVehicleKm(endKm);
+
+    showToast(t("trip_closed_success"), "success");
+
+    // Odmah ponudi otvaranje sledeće vožnje — startKm se preuzima sa
+    // kraja upravo zatvorene vožnje.
+    openNewTripForm(endKm);
+    return true;
+  } catch (e) {
+    showEntryError("close-trip-error", `${t("error")}: ${e.message}`);
+    return false;
+  }
+}
+
+// ── NOVA VOŽNJA (u okviru istog zaduženja) ─────────────────────
+function openNewTripForm(prefillStartKm) {
+  const bodyHTML = `
+    <div class="form-section-title">${t("trip_new_trip_title")}</div>
+    <div class="form-group">
+      <label class="form-label">${t("assignment_start_km")} *</label>
+      <input id="nt-startKm" class="form-input" type="number" value="${prefillStartKm || ""}" />
+    </div>
+    <div class="form-group">
+      <label class="form-label">${t("assignment_type")} *</label>
+      <div class="radio-group">
+        <label class="radio-label">
+          <input type="radio" name="nt-tripType" value="local" checked />
+          🏙️ ${t("assignment_local")}
+        </label>
+        <label class="radio-label">
+          <input type="radio" name="nt-tripType" value="intercity" />
+          ✈️ ${t("assignment_intercity")}
+        </label>
+      </div>
+    </div>
+    <div id="nt-intercity-fields" class="hidden">
+      <div class="form-group">
+        <label class="form-label">${t("assignment_destination")}</label>
+        <input id="nt-destination" class="form-input" type="text" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">${t("assignment_route")}</label>
+        <input id="nt-route" class="form-input" type="text" />
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">${t("assignment_reason")}</label>
+      <textarea id="nt-reason" class="form-textarea"></textarea>
+    </div>
+    <p id="new-trip-error" class="login-error hidden"></p>
+  `;
+
+  // Malo kašnjenje — pusti prethodni modal (zatvaranje vožnje) da se
+  // skloni pre nego što se otvori sledeći, da ne dođe do preklapanja.
+  setTimeout(() => {
+    openModal(t("trip_new_trip_title"), bodyHTML, () => saveNewTrip());
+
+    document.querySelectorAll("input[name='nt-tripType']").forEach(radio => {
+      radio.addEventListener("change", () => {
+        document.getElementById("nt-intercity-fields")?.classList.toggle("hidden", radio.value !== "intercity");
+      });
+    });
+  }, 200);
+}
+
+async function saveNewTrip() {
+  const startKm = parseFloat(document.getElementById("nt-startKm")?.value);
+  if (!startKm || startKm <= 0) {
+    showEntryError("new-trip-error", t("required_field"));
+    return false;
+  }
+
+  const tripType    = document.querySelector("input[name='nt-tripType']:checked")?.value || "local";
+  const destination = document.getElementById("nt-destination")?.value.trim() || null;
+  const route       = document.getElementById("nt-route")?.value.trim() || null;
+  const reason      = document.getElementById("nt-reason")?.value.trim() || null;
+
+  if (tripType === "intercity" && !destination) {
+    showEntryError("new-trip-error", t("assignment_no_destination"));
+    return false;
+  }
+
+  try {
+    const tripData = {
+      assignmentId: activeAssignment.id,
+      vehicleId:    activeAssignment.vehicleId,
+      vehicleBrand: activeAssignment.vehicleBrand,
+      vehicleModel: activeAssignment.vehicleModel,
+      vehiclePlate: activeAssignment.vehiclePlate,
+      vehicleVin:   activeAssignment.vehicleVin || null,
+      driverId:     activeAssignment.driverId,
+      driverName:   activeAssignment.driverName,
+      driverUid:    S.user.uid,
+      startDate:    serverTimestamp(),
+      endDate:      null,
+      startKm,
+      endKm:        null,
+      tripType,
+      destination:  tripType === "intercity" ? destination : null,
+      route:        tripType === "intercity" ? route : null,
+      reason,
+      status:       "active",
+      notes:        null,
+      createdAt:    serverTimestamp(),
+      createdBy:    S.user.uid,
+    };
+    const ref = await addDoc(collection(db, "companies", S.companyId, "trips"), tripData);
+    activeTrip = { id: ref.id, ...tripData, startDate: new Date() };
+
+    showToast(t("trip_new_trip_started"), "success");
+
+    const container = document.getElementById("content");
+    if (container) renderDashboard(container);
+    return true;
+  } catch (e) {
+    showEntryError("new-trip-error", `${t("error")}: ${e.message}`);
+    return false;
+  }
+}
+
 // ── FORMA ZA TOČENJE GORIVA ───────────────────────────────────
 function openFuelForm() {
   const bodyHTML = `
@@ -757,6 +983,7 @@ async function saveFuelEntry() {
     await addDoc(collection(db, "companies", S.companyId, "tripEntries"), {
       type:         "fuel",
       assignmentId: activeAssignment.id,
+      tripId:       activeTrip?.id || null,
       vehicleId:    activeAssignment.vehicleId,
       vehiclePlate: activeAssignment.vehiclePlate,
       driverId:     S.profile?.driverId || null,
@@ -839,6 +1066,7 @@ async function saveCostEntry() {
     await addDoc(collection(db, "companies", S.companyId, "tripEntries"), {
       type:         document.getElementById("tc-type")?.value || "other_cost",
       assignmentId: activeAssignment.id,
+      tripId:       activeTrip?.id || null,
       vehicleId:    activeAssignment.vehicleId,
       vehiclePlate: activeAssignment.vehiclePlate,
       driverId:     S.profile?.driverId || null,
@@ -941,9 +1169,24 @@ async function processDriverUnassign() {
       }
     );
 
+    // Zatvori i trenutno aktivnu vožnju — zaduženje se gasi u celini
+    if (activeTrip) {
+      await updateDoc(
+        doc(db, "companies", S.companyId, "trips", activeTrip.id),
+        {
+          status:    "closed",
+          endDate:   endDateObj,
+          endKm,
+          notes:     notes || null,
+          updatedAt: serverTimestamp(),
+        }
+      );
+    }
+
     showToast(t("unassign_success"), "success");
     activeAssignment = null;
     activeVehicle    = null;
+    activeTrip       = null;
     tripEntries       = [];
 
     const container = document.getElementById("content");
@@ -961,7 +1204,10 @@ async function refreshEntries() {
     where("assignmentId", "==", activeAssignment.id),
     orderBy("createdAt", "desc")
   ));
-  tripEntries = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  const allForAssignment = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  tripEntries = activeTrip
+    ? allForAssignment.filter(e => e.tripId === activeTrip.id || !e.tripId)
+    : allForAssignment;
 
   const listEl = document.getElementById("trip-entries-list");
   if (listEl) {

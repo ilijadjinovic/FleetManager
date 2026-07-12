@@ -290,7 +290,7 @@ async function generateVehicleReport(allVehicles) {
       firstPage = false;
 
       // Dohvati podatke za vozilo u periodu
-      const [assignments, services, entries] = await Promise.all([
+      const [assignments, services, entries, incidents] = await Promise.all([
         getDocsInPeriod("assignments", "startDate", from, to, [
           where("vehicleId", "==", vehicle.id)
         ]),
@@ -300,9 +300,11 @@ async function generateVehicleReport(allVehicles) {
         getDocsInPeriod("tripEntries", "createdAt", from, to, [
           where("vehicleId", "==", vehicle.id)
         ]),
+        getDocsInPeriod("incidents", "createdAt", from, to, [
+          where("vehicleId", "==", vehicle.id)
+        ]),
       ]);
 
-      const incidents = entries.filter(e => ["fault","damage","accident","other"].includes(e.type));
       const fuelings  = entries.filter(e => e.type === "fuel");
       const costs     = entries.filter(e => ["toll","parking","washing","other_cost"].includes(e.type));
 
@@ -602,8 +604,8 @@ function drawHeader(pdf, company, from, to) {
   return y;
 }
 
-function drawSectionTitle(pdf, title, y) {
-  checkPageBreak(pdf, y, 12);
+function drawSectionTitle(pdf, title, y, minFollow = 0) {
+  y = checkPageBreak(pdf, y, 12 + minFollow);
   pdf.setFillColor(240, 244, 255);
   pdf.rect(M, y - 4, PW, 8, "F");
   pdf.setFont(REPORT_FONT, "bold");
@@ -615,7 +617,7 @@ function drawSectionTitle(pdf, title, y) {
 
 function drawRow(pdf, label, value, y, highlight = false) {
   if (!value && value !== 0) return y;
-  checkPageBreak(pdf, y, 7);
+  y = checkPageBreak(pdf, y, 7);
   if (highlight) {
     pdf.setFillColor(248, 250, 255);
     pdf.rect(M, y - 3, PW, 6, "F");
@@ -631,7 +633,7 @@ function drawRow(pdf, label, value, y, highlight = false) {
 }
 
 function drawTableHeader(pdf, cols, y) {
-  checkPageBreak(pdf, y, 8);
+  y = checkPageBreak(pdf, y, 8);
   pdf.setFillColor(26, 39, 68);
   pdf.rect(M, y - 4, PW, 7, "F");
   pdf.setFont(REPORT_FONT, "bold");
@@ -646,7 +648,7 @@ function drawTableHeader(pdf, cols, y) {
 }
 
 function drawTableRow(pdf, cols, values, y, shade = false) {
-  checkPageBreak(pdf, y, 7);
+  y = checkPageBreak(pdf, y, 7);
   if (shade) {
     pdf.setFillColor(248, 250, 255);
     pdf.rect(M, y - 4, PW, 6, "F");
@@ -771,7 +773,7 @@ function drawVehicleSection(pdf, v, y) {
 }
 
 function drawAssignmentsSection(pdf, assignments, y) {
-  y = drawSectionTitle(pdf, `${t("report_pdf_section_assignments")} (${assignments.length})`, y);
+  y = drawSectionTitle(pdf, `${t("report_pdf_section_assignments")} (${assignments.length})`, y, 15);
   if (assignments.length === 0) {
     y = drawEmptyRow(pdf, y);
     return y;
@@ -813,7 +815,7 @@ function drawAssignmentsSection(pdf, assignments, y) {
 }
 
 function drawServicesSection(pdf, services, y) {
-  y = drawSectionTitle(pdf, `${t("report_pdf_section_services")} (${services.length})`, y);
+  y = drawSectionTitle(pdf, `${t("report_pdf_section_services")} (${services.length})`, y, 15);
   if (services.length === 0) { return drawEmptyRow(pdf, y); }
 
   const cols = [
@@ -835,7 +837,7 @@ function drawServicesSection(pdf, services, y) {
     ], y, i % 2 === 0);
 
     if (s.description) {
-      checkPageBreak(pdf, y, 6);
+      y = checkPageBreak(pdf, y, 6);
       pdf.setFont(REPORT_FONT, "italic");
       pdf.setFontSize(7.5);
       pdf.setTextColor(100);
@@ -858,16 +860,17 @@ function drawServicesSection(pdf, services, y) {
 }
 
 function drawFuelingsSection(pdf, fuelings, y) {
-  y = drawSectionTitle(pdf, `${t("report_pdf_section_fuelings")} (${fuelings.length})`, y);
+  y = drawSectionTitle(pdf, `${t("report_pdf_section_fuelings")} (${fuelings.length})`, y, 15);
   if (fuelings.length === 0) { return drawEmptyRow(pdf, y); }
 
   const cols = [
-    [t("report_pdf_col_date"),        28],
-    [t("report_pdf_col_fuel"),        25],
-    [t("report_pdf_col_amount"),      25],
-    [t("report_pdf_col_price"),       28],
-    [t("report_pdf_col_price_per_l"), 25],
-    [t("report_pdf_col_station"),     55],
+    [t("report_pdf_col_date"),        25],
+    [t("report_pdf_col_fuel"),        20],
+    [t("report_pdf_col_amount"),      20],
+    [t("report_pdf_col_price"),       25],
+    [t("report_pdf_col_price_per_l"), 22],
+    [t("report_pdf_col_km"),          20],
+    [t("report_pdf_col_station"),     48],
   ];
 
   y = drawTableHeader(pdf, cols, y);
@@ -878,6 +881,7 @@ function drawFuelingsSection(pdf, fuelings, y) {
       f.fuelAmount ? f.fuelAmount.toFixed(2) + " L" : "—",
       f.fuelCost ? f.fuelCost.toLocaleString() + " RSD" : "—",
       f.pricePerL ? f.pricePerL.toFixed(2) + " RSD" : "—",
+      f.currentKm ? f.currentKm.toLocaleString() : "—",
       f.fuelStation || "—",
     ], y, i % 2 === 0);
   });
@@ -899,13 +903,14 @@ function drawFuelingsSection(pdf, fuelings, y) {
 
 function drawCostsSection(pdf, costs, y) {
   if (costs.length === 0) return y;
-  y = drawSectionTitle(pdf, `${t("report_pdf_section_costs")} (${costs.length})`, y);
+  y = drawSectionTitle(pdf, `${t("report_pdf_section_costs")} (${costs.length})`, y, 15);
 
   const cols = [
-    [t("report_pdf_col_date"),           28],
-    [t("report_pdf_col_kind"),           40],
-    [t("report_pdf_col_price"),          28],
-    [t("report_pdf_location_label"),     90],
+    [t("report_pdf_col_date"),           25],
+    [t("report_pdf_col_kind"),           30],
+    [t("report_pdf_col_price"),          25],
+    [t("report_pdf_col_km"),             20],
+    [t("report_pdf_location_label"),     80],
   ];
 
   y = drawTableHeader(pdf, cols, y);
@@ -918,6 +923,7 @@ function drawCostsSection(pdf, costs, y) {
       formatDateSr(c.createdAt),
       typeLabels[c.type] || c.type,
       c.amount ? c.amount.toLocaleString() + " RSD" : "—",
+      c.currentKm ? c.currentKm.toLocaleString() : "—",
       c.location || "—",
     ], y, i % 2 === 0);
   });
@@ -933,10 +939,10 @@ function drawCostsSection(pdf, costs, y) {
 
 function drawIncidentsSection(pdf, incidents, y) {
   if (incidents.length === 0) return y;
-  y = drawSectionTitle(pdf, `${t("report_pdf_section_incidents")} (${incidents.length})`, y);
+  y = drawSectionTitle(pdf, `${t("report_pdf_section_incidents")} (${incidents.length})`, y, 25);
 
   incidents.forEach((inc, i) => {
-    checkPageBreak(pdf, y, 20);
+    y = checkPageBreak(pdf, y, 25);
     const typeLabels = {
       fault: t("incident_fault"), damage: t("incident_damage"),
       accident: t("incident_accident"), other: t("incident_other"),
@@ -948,7 +954,7 @@ function drawIncidentsSection(pdf, incidents, y) {
 
     if (i % 2 === 0) {
       pdf.setFillColor(248, 250, 255);
-      pdf.rect(M, y - 3, PW, 16, "F");
+      pdf.rect(M, y - 3, PW, 20, "F");
     }
 
     pdf.setFont(REPORT_FONT, "bold");
@@ -959,6 +965,17 @@ function drawIncidentsSection(pdf, incidents, y) {
       M + 2, y
     );
     y += 5;
+
+    if (inc.driverName || inc.currentKm) {
+      pdf.setFont(REPORT_FONT, "normal");
+      pdf.setFontSize(8);
+      pdf.setTextColor(100);
+      const metaParts = [];
+      if (inc.driverName) metaParts.push(inc.driverName);
+      if (inc.currentKm) metaParts.push(`${Number(inc.currentKm).toLocaleString()} km`);
+      pdf.text(metaParts.join("  |  "), M + 2, y);
+      y += 4.5;
+    }
 
     pdf.setFont(REPORT_FONT, "normal");
     pdf.setFontSize(8);
@@ -1000,7 +1017,7 @@ function drawDriverSection(pdf, d, y) {
 }
 
 function drawDriverAssignmentsSection(pdf, assignments, y) {
-  y = drawSectionTitle(pdf, `${t("report_pdf_section_driver_assignments")} (${assignments.length})`, y);
+  y = drawSectionTitle(pdf, `${t("report_pdf_section_driver_assignments")} (${assignments.length})`, y, 15);
   if (assignments.length === 0) { return drawEmptyRow(pdf, y); }
 
   const cols = [
@@ -1027,7 +1044,7 @@ function drawDriverAssignmentsSection(pdf, assignments, y) {
     ], y, i % 2 === 0);
 
     if (a.tripType === "intercity" && a.destination) {
-      checkPageBreak(pdf, y, 5);
+      y = checkPageBreak(pdf, y, 5);
       pdf.setFont(REPORT_FONT, "italic");
       pdf.setFontSize(7.5);
       pdf.setTextColor(100);

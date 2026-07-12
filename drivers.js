@@ -17,6 +17,8 @@ import {
 import { t, getCurrentLang } from "./i18n.js";
 import { S, showToast, openModal } from "./app.js";
 import { usernameToEmail, getSecondaryAuth } from "./firebase.js";
+import { historyAssignmentCard, attachAssignmentHistoryEvents, loadDriverAssignmentHistory } from "./trips.js";
+import { incidentCard, scheduleServiceForIncident } from "./incidents.js";
 
 // ── STANJE MODULA ─────────────────────────────────────────────
 let allDrivers = [];
@@ -234,7 +236,6 @@ async function openDriverDetail(driverId) {
     <div class="tab-strip" id="driver-tabs">
       <button class="tab-strip__btn tab-strip__btn--active" data-dtab="info">${t("driver_tab_info")}</button>
       <button class="tab-strip__btn" data-dtab="assignments">${t("driver_tab_assignments")}</button>
-      <button class="tab-strip__btn" data-dtab="trips">${t("driver_tab_trips")}</button>
       <button class="tab-strip__btn" data-dtab="incidents">${t("driver_tab_incidents")}</button>
     </div>
 
@@ -277,7 +278,6 @@ function renderDriverTab(tab, driver) {
   switch (tab) {
     case "info":        content.innerHTML = renderInfoTab(driver); break;
     case "assignments": loadDriverAssignments(content, driver); break;
-    case "trips":       loadDriverTrips(content, driver); break;
     case "incidents":   loadDriverIncidents(content, driver); break;
   }
 }
@@ -316,56 +316,23 @@ function renderInfoTab(d) {
 async function loadDriverAssignments(container, driver) {
   container.innerHTML = `<div class="loading">${t("loading")}</div>`;
   try {
-    const snap = await getDocs(query(
-      collection(db, "companies", S.companyId, "assignments"),
-      where("driverId", "==", driver.id),
-      orderBy("startDate", "desc")
-    ));
-    const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    container.innerHTML = items.length === 0
-      ? `<div class="empty-state"><div class="empty-state__icon">🔑</div><p>${t("no_data")}</p></div>`
-      : `<div class="assignment-list">${items.map(a => assignmentItem(a)).join("")}</div>`;
-  } catch (e) {
-    container.innerHTML = `<div class="error-state">${t("error")}: ${e.message}</div>`;
-  }
-}
+    const { assignments, tripsByAssignment, entriesByTrip, entriesByAssignment } =
+      await loadDriverAssignmentHistory({
+        primaryField: "driverId", primaryValue: driver.id,
+        fallbackField: "driverUid", fallbackValue: driver.localAuthUid || null,
+      });
 
-async function loadDriverTrips(container, driver) {
-  container.innerHTML = `<div class="loading">${t("loading")}</div>`;
-  try {
-    const snap = await getDocs(query(
-      collection(db, "companies", S.companyId, "trips"),
-      where("driverId", "==", driver.id),
-      orderBy("createdAt", "desc")
-    ));
-    const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    if (items.length === 0) {
-      container.innerHTML = `<div class="empty-state"><div class="empty-state__icon">🛣️</div><p>${t("no_data")}</p></div>`;
+    if (assignments.length === 0) {
+      container.innerHTML = `<div class="empty-state"><div class="empty-state__icon">🔑</div><p>${t("no_data")}</p></div>`;
       return;
     }
+
     container.innerHTML = `
-      <div class="trips-summary">
-        <div class="trip-stat">
-          <span class="trip-stat__value">${items.length}</span>
-          <span class="trip-stat__label">${t("driver_trips_count")}</span>
-        </div>
-        <div class="trip-stat">
-          <span class="trip-stat__value">${items.reduce((s, i) => s + ((i.endKm || 0) - (i.startKm || 0)), 0).toLocaleString()}</span>
-          <span class="trip-stat__label">${t("driver_trips_km")}</span>
-        </div>
-        <div class="trip-stat">
-          <span class="trip-stat__value">${items.reduce((s, i) => s + (i.fuelAmount || 0), 0).toFixed(1)}</span>
-          <span class="trip-stat__label">${t("driver_trips_fuel_l")}</span>
-        </div>
-        <div class="trip-stat">
-          <span class="trip-stat__value">${items.reduce((s, i) => s + (i.fuelCost || 0), 0).toLocaleString()}</span>
-          <span class="trip-stat__label">${t("driver_trips_fuel_rsd")}</span>
-        </div>
-      </div>
-      <div class="trips-list">
-        ${items.map(trip => tripItem(trip)).join("")}
+      <div class="trip-history-list">
+        ${assignments.map(a => historyAssignmentCard(a, tripsByAssignment, entriesByTrip, entriesByAssignment)).join("")}
       </div>
     `;
+    attachAssignmentHistoryEvents(container);
   } catch (e) {
     container.innerHTML = `<div class="error-state">${t("error")}: ${e.message}</div>`;
   }
@@ -380,9 +347,91 @@ async function loadDriverIncidents(container, driver) {
       orderBy("createdAt", "desc")
     ));
     const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    container.innerHTML = items.length === 0
-      ? `<div class="empty-state"><div class="empty-state__icon">⚠️</div><p>${t("no_data")}</p></div>`
-      : `<div class="incidents-list">${items.map(i => incidentItem(i)).join("")}</div>`;
+
+    if (items.length === 0) {
+      container.innerHTML = `<div class="empty-state"><div class="empty-state__icon">⚠️</div><p>${t("no_data")}</p></div>`;
+      return;
+    }
+
+    // Grupiši prijave po zaduženju
+    const byAssignment = {};
+    items.forEach(i => {
+      const key = i.assignmentId || "unknown";
+      (byAssignment[key] ||= []).push(i);
+    });
+
+    // Dohvati podatke o zaduženjima (za naslov grupe) i vožnjama
+    // (da bi svaka prijava mogla da nazna u kojoj je vožnji nastala)
+    const assignmentIds = Object.keys(byAssignment).filter(k => k !== "unknown");
+    const assignmentsInfo = {};
+    await Promise.all(assignmentIds.map(async (aid) => {
+      try {
+        const aSnap = await getDoc(doc(db, "companies", S.companyId, "assignments", aid));
+        if (aSnap.exists()) assignmentsInfo[aid] = { id: aid, ...aSnap.data() };
+      } catch (e) { /* ignoriši — prikaži grupu bez zaglavlja */ }
+    }));
+
+    const tripIds = [...new Set(items.map(i => i.tripId).filter(Boolean))];
+    const tripsInfo = {};
+    await Promise.all(tripIds.map(async (tid) => {
+      try {
+        const tSnap = await getDoc(doc(db, "companies", S.companyId, "trips", tid));
+        if (tSnap.exists()) tripsInfo[tid] = { id: tid, ...tSnap.data() };
+      } catch (e) { /* ignoriši */ }
+    }));
+
+    // Grupe sortirane po datumu zaduženja — najnovije prvo; nepoznato na kraju
+    const sortedKeys = assignmentIds.sort((a, b) => {
+      const da = toJsDate(assignmentsInfo[a]?.startDate);
+      const dbb = toJsDate(assignmentsInfo[b]?.startDate);
+      return (dbb?.getTime() || 0) - (da?.getTime() || 0);
+    });
+    if (byAssignment["unknown"]) sortedKeys.push("unknown");
+
+    container.innerHTML = `
+      <div class="incidents-by-assignment">
+        ${sortedKeys.map(key => {
+          const a = assignmentsInfo[key];
+          const groupItems = byAssignment[key];
+          const headerHTML = a
+            ? `
+              <div class="incidents-group__header">
+                🚗 <strong>${a.vehicleBrand || ""} ${a.vehicleModel || ""}</strong> — ${a.vehiclePlate || ""}
+                <span class="incidents-group__dates">📅 ${formatDate(a.startDate)} → ${a.endDate ? formatDate(a.endDate) : t("assignment_status_active")}</span>
+              </div>
+            `
+            : `<div class="incidents-group__header">${t("driver_tab_incidents")}</div>`;
+
+          return `
+            <div class="incidents-group">
+              ${headerHTML}
+              <div class="incidents-group__items">
+                ${groupItems.map(i => {
+                  const trip = i.tripId ? tripsInfo[i.tripId] : null;
+                  const tripLabel = trip
+                    ? `${formatDate(trip.startDate)}${trip.destination ? " — 📍 " + trip.destination : ""}`
+                    : null;
+                  return `
+                    <div class="incident-item-wrap">
+                      ${tripLabel ? `<div class="incident-item__trip-label">🔑 ${t("driver_trip_label")}: ${tripLabel}</div>` : ""}
+                      ${incidentCard(i, false, true)}
+                    </div>
+                  `;
+                }).join("")}
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+
+    container.querySelectorAll(".btn-incident-schedule-service").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const incident = items.find(i => i.id === btn.dataset.id);
+        if (incident) scheduleServiceForIncident(incident, () => loadDriverIncidents(container, driver));
+      });
+    });
   } catch (e) {
     container.innerHTML = `<div class="error-state">${t("error")}: ${e.message}</div>`;
   }
@@ -814,42 +863,6 @@ function assignmentItem(a) {
   `;
 }
 
-function tripItem(trip) {
-  const km = (trip.endKm || 0) - (trip.startKm || 0);
-  return `
-    <div class="trip-item">
-      <div class="trip-item__header">
-        <span class="trip-item__date">${formatDate(trip.createdAt)}</span>
-        <span class="trip-item__km">${km > 0 ? "+" + km.toLocaleString() + " km" : "—"}</span>
-      </div>
-      <div class="trip-item__meta">
-        ${trip.startKm ? `<span>${trip.startKm.toLocaleString()} → ${(trip.endKm || 0).toLocaleString()} km</span>` : ""}
-        ${trip.fuelAmount ? `<span>⛽ ${trip.fuelAmount}L` + (trip.fuelCost ? ` / ${trip.fuelCost.toLocaleString()} RSD` : "") + `</span>` : ""}
-        ${trip.fuelStation ? `<span>🏪 ${trip.fuelStation}</span>` : ""}
-      </div>
-    </div>
-  `;
-}
-
-function incidentItem(inc) {
-  const typeIcons = { fault: "🔧", damage: "💥", accident: "🚨", other: "📋" };
-  return `
-    <div class="incident-item">
-      <div class="incident-item__header">
-        <span>${typeIcons[inc.type] || "⚠️"} ${t("incident_" + inc.type) || inc.type}</span>
-        <span class="badge badge--${inc.status === "closed" ? "inactive" : inc.status === "in_progress" ? "service" : "broken"}">
-          ${t("incident_status_" + inc.status) || inc.status}
-        </span>
-      </div>
-      <div class="incident-item__desc">${inc.description || ""}</div>
-      <div class="incident-item__meta">
-        ${inc.vehiclePlate ? `<span>🚗 ${inc.vehiclePlate}</span>` : ""}
-        ${inc.location ? `<span>📍 ${inc.location}</span>` : ""}
-        <span class="incident-item__date">${formatDate(inc.createdAt)}</span>
-      </div>
-    </div>
-  `;
-}
 
 // ── UTILS ─────────────────────────────────────────────────────
 function formatDate(val) {
@@ -857,6 +870,12 @@ function formatDate(val) {
   const d = val.toDate ? val.toDate() : new Date(val);
   const locale = getCurrentLang() === "en" ? "en-GB" : "sr-RS";
   return isNaN(d) ? "—" : d.toLocaleDateString(locale);
+}
+
+function toJsDate(val) {
+  if (!val) return null;
+  const d = val.toDate ? val.toDate() : new Date(val);
+  return isNaN(d) ? null : d;
 }
 
 function numOrNull(id) {

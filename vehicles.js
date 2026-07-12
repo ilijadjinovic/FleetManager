@@ -13,6 +13,7 @@ import { t, getCurrentLang } from "./i18n.js";
 import { S, showToast, openModal, closeModal } from "./app.js";
 import { getServiceProviders } from "./servicers.js";
 import { effectiveServiceStatus, isServiceToday, isServiceOverdue, overdueDays, SERVICE_STATUS } from "./service-status.js";
+import { incidentCard, scheduleServiceForIncident } from "./incidents.js";
 
 // ── PREDEFINISANE BOJE VOZILA ────────────────────────────────
 const VEHICLE_COLORS = [
@@ -23,6 +24,41 @@ const VEHICLE_COLORS = [
 function colorLabel(code) {
   if (!code) return null;
   return VEHICLE_COLORS.includes(code) ? t("color_" + code) : code;
+}
+
+// ── TIP VOZILA (prema obliku karoserije) ─────────────────────
+const VEHICLE_TYPES = [
+  "sedan", "hatchback", "wagon", "suv", "mpv", "coupe", "cabrio",
+  "pickup", "van", "tipper", "platform", "tanker", "reefer", "curtain",
+  "car_transporter", "bus", "motorcycle", "other"
+];
+
+function vehicleTypeLabel(code) {
+  if (!code) return null;
+  return VEHICLE_TYPES.includes(code) ? t("vehicle_type_" + code) : code;
+}
+
+// ── KATEGORIJA VOZILA (zvanična klasifikacija iz saobraćajne) ─
+const VEHICLE_CATEGORIES = ["passenger", "van", "truck", "work_machine", "bus", "motorcycle", "trailer", "other"];
+
+function vehicleCategoryLabel(code) {
+  if (!code) return null;
+  return VEHICLE_CATEGORIES.includes(code) ? t("vehicle_category_" + code) : code;
+}
+
+// ── OBAVEZNA OPREMA (bezbednost) ──────────────────────────────
+const REQUIRED_EQUIPMENT_ITEMS = ["triangle", "first_aid", "vest", "tow_rope", "spare_wheel", "accident_report", "fire_extinguisher", "wheel_chocks"];
+
+function equipmentLabel(code) {
+  return REQUIRED_EQUIPMENT_ITEMS.includes(code) ? t("equipment_" + code) : code;
+}
+
+// ── PNEUMATICI ─────────────────────────────────────────────────
+const TIRE_TYPES = ["winter", "summer", "all_season"];
+
+function tireTypeLabel(code) {
+  if (!code) return null;
+  return TIRE_TYPES.includes(code) ? t("tire_" + code) : code;
 }
 
 // ── STATUS REGISTRACIJE (automatski, na osnovu datuma isteka) ───
@@ -249,6 +285,7 @@ export async function openVehicleDetail(vehicleId, initialTab = "tech") {
 
   const TABS = [
     { key: "tech",        label: t("vehicle_tab_tech") },
+    { key: "safety",      label: t("vehicle_tab_safety") },
     { key: "finance",     label: t("vehicle_tab_finance") },
     { key: "service",     label: t("vehicle_tab_service") },
     { key: "incidents",   label: t("vehicle_tab_incidents") },
@@ -317,6 +354,7 @@ function renderVehicleTab(tab, vehicle) {
 
   switch (tab) {
     case "tech":     content.innerHTML = renderTechTab(vehicle); break;
+    case "safety":   content.innerHTML = renderSafetyTab(vehicle); break;
     case "finance":  content.innerHTML = renderFinanceTab(vehicle); break;
     case "service":    loadServiceTab(content, vehicle); break;
     case "incidents":  loadIncidentsTab(content, vehicle); break;
@@ -329,8 +367,8 @@ function renderTechTab(v) {
   const rows = [
     [t("vehicle_brand"),      v.brand],
     [t("vehicle_model"),      v.model],
-    [t("vehicle_type"),       v.vehicleType],
-    [t("vehicle_category"),   v.category],
+    [t("vehicle_type"),       vehicleTypeLabel(v.vehicleType)],
+    [t("vehicle_category"),   vehicleCategoryLabel(v.category)],
     [t("vehicle_plate"),      v.plate],
     [t("vehicle_vin"),        v.vin],
     [t("vehicle_year"),       v.year],
@@ -349,6 +387,57 @@ function renderTechTab(v) {
     [t("vehicle_insurance_expiry"),  formatDate(v.insuranceExpiry)],
   ];
   return detailTable(rows);
+}
+
+// ── OČEKIVANA SEZONA PNEUMATIKA ───────────────────────────────
+// Zimske gume moraju biti na vozilu od 01.11. do 31.03. (meseci 11,12,1,2,3),
+// letnje od 01.04. do 31.10. (meseci 4–10) tekuće godine. Pošto se period
+// uvek poklapa sa punim mesecima (počinje 1., završava se poslednjim danom
+// meseca), dovoljno je porediti samo mesec — bez potrebe za danom u mesecu.
+function expectedTireSeason(date = new Date()) {
+  const m = date.getMonth() + 1; // 1–12
+  return (m === 11 || m === 12 || m <= 3) ? "winter" : "summer";
+}
+
+function renderSafetyTab(v) {
+  const tireType = v.tires?.type || null;
+  const tireDimensions = v.tires?.dimensions || null;
+
+  // all_season je uvek "u redu"; za zimske/letnje poredi se sa tekućim periodom
+  const tireOk = !tireType ? null : (tireType === "all_season" || tireType === expectedTireSeason());
+  const tireBadgeClass = tireType ? (tireOk ? "badge--active" : "badge--broken") : "badge--inactive";
+
+  const equipmentRows = REQUIRED_EQUIPMENT_ITEMS.map(eq => {
+    const has = (v.requiredEquipment || []).includes(eq);
+    const color = has ? "var(--color-success)" : "var(--color-danger)";
+    return `
+      <div class="detail-row">
+        <div class="detail-row__label">${equipmentLabel(eq)}</div>
+        <div class="detail-row__value" style="color:${color};font-weight:700">${has ? "✓ " + t("yes") : "✕ " + t("no")}</div>
+      </div>
+    `;
+  }).join("");
+
+  return `
+    <div class="form-section-title">${t("vehicle_tires")}</div>
+    <div class="detail-table">
+      <div class="detail-row">
+        <div class="detail-row__label">${t("vehicle_tires_type")}</div>
+        <div class="detail-row__value">
+          ${tireType ? `<span class="badge ${tireBadgeClass}">${tireTypeLabel(tireType)}</span>` : "—"}
+        </div>
+      </div>
+      <div class="detail-row">
+        <div class="detail-row__label">${t("vehicle_tires_dimensions")}</div>
+        <div class="detail-row__value">${tireDimensions || "—"}</div>
+      </div>
+    </div>
+
+    <div class="form-section-title" style="margin-top:16px">${t("vehicle_required_equipment")}</div>
+    <div class="detail-table">
+      ${equipmentRows}
+    </div>
+  `;
 }
 
 function renderFinanceTab(v) {
@@ -437,6 +526,8 @@ async function loadServiceTab(container, vehicle) {
 }
 
 // ── TAB "PRIJAVE" (kvarovi/oštećenja/nezgode za ovo vozilo) ────
+// Isti vizuelni prikaz i logika kao u drivers.js (tab "Prijave" kod
+// konkretnog vozača) — koristi se ista incidentCard komponenta.
 async function loadIncidentsTab(container, vehicle) {
   container.innerHTML = `<div class="loading">${t("loading")}</div>`;
   const canEdit = S.profile?.role !== "driver" && !vehicle.archived;
@@ -452,13 +543,13 @@ async function loadIncidentsTab(container, vehicle) {
 
     container.innerHTML = items.length === 0
       ? `<div class="empty-state"><div class="empty-state__icon">⚠️</div><p>${t("no_data")}</p></div>`
-      : `<div class="service-list">${items.map(i => vehicleIncidentItem(i, canEdit)).join("")}</div>`;
+      : `<div class="incidents-list">${items.map(i => incidentCard(i, false, canEdit)).join("")}</div>`;
 
     if (canEdit) {
-      container.querySelectorAll(".btn-schedule-service").forEach(btn => {
+      container.querySelectorAll(".btn-incident-schedule-service").forEach(btn => {
         btn.addEventListener("click", () => {
           const inc = items.find(x => x.id === btn.dataset.id);
-          if (inc) openServiceForm(vehicle, null, incidentToServicePrefill(inc));
+          if (inc) scheduleServiceForIncident(inc, () => loadIncidentsTab(container, vehicle));
         });
       });
     }
@@ -469,7 +560,8 @@ async function loadIncidentsTab(container, vehicle) {
 
 // Priprema početnih vrednosti za formu "Dodaj servis" na osnovu prijave
 // (ne tretira se kao edit — samo predpopunjava polja nove forme).
-function incidentToServicePrefill(inc) {
+// Eksportovano — koristi ga i incidents.js/drivers.js.
+export function incidentToServicePrefill(inc) {
   const typeLabels = {
     fault:    t("incident_fault"),
     damage:   t("incident_damage"),
@@ -482,45 +574,6 @@ function incidentToServicePrefill(inc) {
     km:          inc.currentKm ?? null,
     description: `${prefix}${inc.description ? ": " + inc.description : ""}`,
   };
-}
-
-function vehicleIncidentItem(i, canEdit) {
-  const typeConfig = {
-    fault:    { icon: "🔧", label: t("incident_fault"),    color: "service" },
-    damage:   { icon: "💥", label: t("incident_damage"),   color: "broken" },
-    accident: { icon: "🚨", label: t("incident_accident"), color: "broken" },
-    other:    { icon: "📋", label: t("incident_other"),    color: "inactive" },
-  };
-  const cfg = typeConfig[i.type] || { icon: "📋", label: i.type, color: "inactive" };
-
-  const statusBadge = i.status === "open"
-    ? `<span class="badge badge--broken">🔴 ${t("incident_status_open")}</span>`
-    : i.status === "in_progress"
-      ? `<span class="badge badge--service">🟡 ${t("incident_status_in_progress")}</span>`
-      : `<span class="badge badge--active">🟢 ${t("incident_status_closed")}</span>`;
-
-  return `
-    <div class="service-item">
-      <div class="service-item__header">
-        <div class="service-item__badges">
-          <span class="badge badge--${cfg.color}">${cfg.icon} ${cfg.label}</span>
-          ${statusBadge}
-        </div>
-        <span class="service-item__date">${formatDate(i.createdAt)}</span>
-      </div>
-      ${i.description ? `<div class="service-item__desc">${i.description}</div>` : ""}
-      <div class="service-item__meta">
-        ${i.driverName ? `<span>👤 ${i.driverName}</span>` : ""}
-        ${i.currentKm ? `<span>🛣️ ${i.currentKm.toLocaleString()} km</span>` : ""}
-        ${i.location ? `<span>📍 ${i.location}</span>` : ""}
-      </div>
-      ${canEdit && i.status !== "closed" ? `
-        <div class="service-item__actions">
-          <button class="btn btn--secondary btn--sm btn-schedule-service" data-id="${i.id}">🔧 ${t("incident_schedule_service_btn")}</button>
-        </div>
-      ` : ""}
-    </div>
-  `;
 }
 
 async function loadAssignmentsTab(container, vehicle) {
@@ -563,11 +616,27 @@ function openVehicleForm(vehicle = null) {
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">${t("vehicle_type")}</label>
-        <input id="f-vehicleType" class="form-input" type="text" value="${v.vehicleType || ""}" />
+        <select id="f-vehicleType" class="form-select">
+          <option value="">—</option>
+          ${VEHICLE_TYPES.map(vt =>
+            `<option value="${vt}" ${v.vehicleType === vt ? "selected" : ""}>${t("vehicle_type_" + vt)}</option>`
+          ).join("")}
+          ${v.vehicleType && !VEHICLE_TYPES.includes(v.vehicleType)
+            ? `<option value="${v.vehicleType}" selected>${v.vehicleType}</option>`
+            : ""}
+        </select>
       </div>
       <div class="form-group">
         <label class="form-label">${t("vehicle_category")}</label>
-        <input id="f-category" class="form-input" type="text" value="${v.category || ""}" />
+        <select id="f-category" class="form-select">
+          <option value="">—</option>
+          ${VEHICLE_CATEGORIES.map(c =>
+            `<option value="${c}" ${v.category === c ? "selected" : ""}>${t("vehicle_category_" + c)}</option>`
+          ).join("")}
+          ${v.category && !VEHICLE_CATEGORIES.includes(v.category)
+            ? `<option value="${v.category}" selected>${v.category}</option>`
+            : ""}
+        </select>
       </div>
     </div>
     <div class="form-row">
@@ -684,6 +753,34 @@ function openVehicleForm(vehicle = null) {
       </div>
     </div>
 
+    <div class="form-section-title" style="margin-top:8px">${t("vehicle_section_safety")}</div>
+    <div class="form-group">
+      <label class="form-label">${t("vehicle_required_equipment")}</label>
+      <div class="checkbox-grid">
+        ${REQUIRED_EQUIPMENT_ITEMS.map(eq => `
+          <label class="form-checkbox-label">
+            <input type="checkbox" class="f-equipment" value="${eq}" ${(v.requiredEquipment || []).includes(eq) ? "checked" : ""} />
+            ${t("equipment_" + eq)}
+          </label>
+        `).join("")}
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">${t("vehicle_tires_type")}</label>
+        <select id="f-tiresType" class="form-select">
+          <option value="">—</option>
+          ${TIRE_TYPES.map(tt =>
+            `<option value="${tt}" ${v.tires?.type === tt ? "selected" : ""}>${t("tire_" + tt)}</option>`
+          ).join("")}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">${t("vehicle_tires_dimensions")}</label>
+        <input id="f-tiresDimensions" class="form-input" type="text" placeholder="205/55/16" value="${v.tires?.dimensions || ""}" />
+      </div>
+    </div>
+
     <div class="form-section-title" style="margin-top:8px">${t("vehicle_tab_finance")}</div>
     <div class="form-row">
       <div class="form-group">
@@ -791,10 +888,14 @@ async function saveVehicle(vehicleId) {
       }
     }
 
+    const tiresType = document.getElementById("f-tiresType")?.value || null;
+    const tiresDimensions = document.getElementById("f-tiresDimensions")?.value.trim() || null;
+    const requiredEquipment = Array.from(document.querySelectorAll(".f-equipment:checked")).map(el => el.value);
+
     const data = {
       brand, model, plate, vin,
-      vehicleType:      document.getElementById("f-vehicleType")?.value.trim() || null,
-      category:         document.getElementById("f-category")?.value.trim() || null,
+      vehicleType:      document.getElementById("f-vehicleType")?.value || null,
+      category:         document.getElementById("f-category")?.value || null,
       year:             numOrNull("f-year"),
       firstRegDate:     dateOrNull("f-firstRegDate"),
       engineCc:         numOrNull("f-engineCc"),
@@ -810,6 +911,8 @@ async function saveVehicle(vehicleId) {
       insuranceExpiry:  dateOrNull("f-insuranceExpiry"),
       insuranceCompany: document.getElementById("f-insuranceCompany")?.value.trim() || null,
       insurancePolicy:  document.getElementById("f-insurancePolicy")?.value.trim() || null,
+      requiredEquipment,
+      tires: (tiresType || tiresDimensions) ? { type: tiresType, dimensions: tiresDimensions } : null,
       purchaseDate:     dateOrNull("f-purchaseDate"),
       purchaseType:     document.getElementById("f-purchaseType")?.value.trim() || null,
       purchaseValue:    numOrNull("f-purchaseValue"),
@@ -890,7 +993,14 @@ function confirmHardDeleteVehicle(vehicle) {
 }
 
 // ── SERVIS FORMA (dodavanje / editovanje) ────────────────────
-async function openServiceForm(vehicle, service = null, prefill = null) {
+// Eksportovano — koristi ga i incidents.js/drivers.js za zakazivanje
+// servisa direktno iz prijave (dugme "Zakaži servis").
+// options.linkedIncidentId: ako je zadat, po uspešnom čuvanju NOVOG
+//   servisa prijava se automatski prebacuje u status "u obradi".
+// options.onSaved: ako je zadat, poziva se posle uspešnog čuvanja
+//   umesto podrazumevanog osvežavanja taba "Servisi" na kartici vozila
+//   (taj tab ne postoji kad se forma otvara iz prijave).
+export async function openServiceForm(vehicle, service = null, prefill = null, options = {}) {
   const isEdit = !!service;
   const s = service || prefill || {};
   const servicers = await getServiceProviders();
@@ -1002,11 +1112,24 @@ async function openServiceForm(vehicle, service = null, prefill = null) {
         await addDoc(collection(db, "companies", S.companyId, "services"), {
           ...data, createdBy: S.user.uid, createdAt: serverTimestamp(),
         });
+
+        // Servis zakazan iz prijave — prijava prelazi u status "u obradi"
+        if (options.linkedIncidentId) {
+          await updateDoc(doc(db, "companies", S.companyId, "incidents", options.linkedIncidentId), {
+            status:    "in_progress",
+            updatedAt: serverTimestamp(),
+            updatedBy: S.user.uid,
+          });
+        }
       }
 
       showToast(t("success"), "success");
-      const content = document.getElementById("vehicle-tab-content");
-      if (content) loadServiceTab(content, vehicle);
+      if (options.onSaved) {
+        options.onSaved();
+      } else {
+        const content = document.getElementById("vehicle-tab-content");
+        if (content) loadServiceTab(content, vehicle);
+      }
     } catch (e) {
       showToast(`${t("error")}: ${e.message}`, "error");
     }

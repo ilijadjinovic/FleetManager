@@ -29,7 +29,7 @@ export async function renderTrips(container) {
 
 // ── VOZAČKI PRIKAZ: ISTORIJA VOŽNJI ────────────────────────────
 async function renderDriverHistoryView(container) {
-  const { pastAssignments, entriesByAssignment } = await loadTripHistory();
+  const { pastAssignments, tripsByAssignment, entriesByTrip, entriesByAssignment } = await loadTripHistory();
 
   if (pastAssignments.length === 0) {
     container.innerHTML = `
@@ -42,60 +42,78 @@ async function renderDriverHistoryView(container) {
     return;
   }
 
-  container.innerHTML = renderHistorySection(pastAssignments, entriesByAssignment);
-  attachDriverHistoryEvents();
+  container.innerHTML = renderHistorySection(pastAssignments, tripsByAssignment, entriesByTrip, entriesByAssignment);
+  attachAssignmentHistoryEvents(container);
 }
 
-// ── UČITAJ ISTORIJU ZADUŽENJA (zatvorena) + SVE UNOSE VOZAČA ──
+// ── UČITAJ ISTORIJU ZADUŽENJA (zatvorena) + VOŽNJE + SVE UNOSE ──
 async function loadTripHistory() {
-  let allAssignments = [];
-  let allEntries     = [];
+  const { assignments, tripsByAssignment, entriesByTrip, entriesByAssignment } =
+    await loadDriverAssignmentHistory({
+      primaryField: "driverUid", primaryValue: S.user.uid,
+      fallbackField: "driverId", fallbackValue: S.profile?.driverId,
+    });
 
-  try {
-    let assignmentsSnap = await getDocs(query(
-      collection(db, "companies", S.companyId, "assignments"),
-      where("driverUid", "==", S.user.uid),
-      orderBy("startDate", "desc")
-    )).catch(() => ({ docs: [] }));
+  const pastAssignments = assignments.filter(a => a.status === "closed");
+  return { pastAssignments, tripsByAssignment, entriesByTrip, entriesByAssignment };
+}
 
-    if (assignmentsSnap.docs.length === 0 && S.profile?.driverId) {
-      assignmentsSnap = await getDocs(query(
-        collection(db, "companies", S.companyId, "assignments"),
-        where("driverId", "==", S.profile.driverId),
-        orderBy("startDate", "desc")
+// ── GENERALIZOVANI UČITAVAČ ISTORIJE (koristi ga i drivers.js za
+//    prikaz zaduženja/vožnji konkretnog vozača iz admin panela) ───
+// primaryField/primaryValue se pokušava prvo; ako ne vrati ništa i
+// fallbackValue je zadat, pokušava se i fallbackField (isti obrazac
+// koji je ranije korišćen samo za vozačev sopstveni prikaz).
+export async function loadDriverAssignmentHistory({ primaryField, primaryValue, fallbackField, fallbackValue }) {
+  async function fetchWithFallback(collName, orderField, orderDir) {
+    let snap = primaryValue ? await getDocs(query(
+      collection(db, "companies", S.companyId, collName),
+      where(primaryField, "==", primaryValue),
+      orderBy(orderField, orderDir)
+    )).catch(() => ({ docs: [] })) : { docs: [] };
+
+    if (snap.docs.length === 0 && fallbackValue) {
+      snap = await getDocs(query(
+        collection(db, "companies", S.companyId, collName),
+        where(fallbackField, "==", fallbackValue),
+        orderBy(orderField, orderDir)
       )).catch(() => ({ docs: [] }));
     }
-    allAssignments = assignmentsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-
-    const entriesSnap = await getDocs(query(
-      collection(db, "companies", S.companyId, "tripEntries"),
-      where("driverUid", "==", S.user.uid),
-      orderBy("createdAt", "asc")
-    )).catch(() => ({ docs: [] }));
-    allEntries = entriesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-
-  } catch (e) {
-    console.error("loadTripHistory error:", e);
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
   }
 
-  const entriesByAssignment = {};
-  allEntries.forEach(e => {
-    if (!e.assignmentId) return;
-    (entriesByAssignment[e.assignmentId] ||= []).push(e);
+  let assignments = [], trips = [], entries = [];
+  try {
+    assignments = await fetchWithFallback("assignments", "startDate", "desc");
+    trips       = await fetchWithFallback("trips", "startDate", "asc");
+    entries     = await fetchWithFallback("tripEntries", "createdAt", "asc");
+  } catch (e) {
+    console.error("loadDriverAssignmentHistory error:", e);
+  }
+
+  const tripsByAssignment = {};
+  trips.forEach(tr => {
+    if (!tr.assignmentId) return;
+    (tripsByAssignment[tr.assignmentId] ||= []).push(tr);
   });
-  // Upit je rastuće po datumu — okreni svaku grupu da bude najnovije prvo.
+
+  const entriesByTrip = {};
+  const entriesByAssignment = {};
+  entries.forEach(e => {
+    if (e.assignmentId) (entriesByAssignment[e.assignmentId] ||= []).push(e);
+    if (e.tripId) (entriesByTrip[e.tripId] ||= []).push(e);
+  });
+  // Upiti su rastuće po datumu — okreni svaku grupu da bude najnovije prvo.
   Object.values(entriesByAssignment).forEach(list => list.reverse());
+  Object.values(entriesByTrip).forEach(list => list.reverse());
 
-  const pastAssignments = allAssignments.filter(a => a.status === "closed");
-
-  return { pastAssignments, entriesByAssignment };
+  return { assignments, tripsByAssignment, entriesByTrip, entriesByAssignment };
 }
 
 // ── ISTORIJA VOŽNJI — grupisano po mesecu, na osnovu startDate ──
-function renderHistorySection(pastAssignments, entriesByAssignment) {
+function renderHistorySection(pastAssignments, tripsByAssignment, entriesByTrip, entriesByAssignment) {
   const locale = getCurrentLang() === "en" ? "en-GB" : "sr-RS";
 
-  // Grupiši po mesecu/godini početka vožnje (startDate)
+  // Grupiši po mesecu/godini početka zaduženja (startDate)
   const groups = new Map(); // "YYYY-MM" -> { date, items: [] }
   pastAssignments.forEach(a => {
     const d = toJsDate(a.startDate);
@@ -129,7 +147,7 @@ function renderHistorySection(pastAssignments, entriesByAssignment) {
         <div class="trip-history-month">
           <div class="trip-history-month__label">${monthLabel}</div>
           <div class="trip-history-list">
-            ${items.map(a => historyAssignmentCard(a, entriesByAssignment[a.id] || [])).join("")}
+            ${items.map(a => historyAssignmentCard(a, tripsByAssignment, entriesByTrip, entriesByAssignment)).join("")}
           </div>
         </div>
       `;
@@ -141,9 +159,104 @@ function capitalizeFirst(str) {
   return str ? str.charAt(0).toUpperCase() + str.slice(1) : str;
 }
 
-// ── ISTORIJA — kartica jedne vožnje (klik = detalji) ───────────
-function historyAssignmentCard(a, entries) {
-  const km = (a.endKm != null && a.startKm != null) ? (a.endKm - a.startKm) : null;
+// ── ISTORIJA — kartica ZADUŽENJA (klik = proširi listu vožnji) ──
+// Eksportovano — koristi ga i drivers.js za identičan prikaz u admin
+// panelu (tab "Zaduženja" kod konkretnog vozača).
+export function historyAssignmentCard(a, tripsByAssignment, entriesByTrip, entriesByAssignment) {
+  const assignmentEntries = entriesByAssignment[a.id] || [];
+
+  let trips = (tripsByAssignment[a.id] || []).slice().sort((x, y) => {
+    const dx = toJsDate(x.startDate), dy = toJsDate(y.startDate);
+    return (dx?.getTime() || 0) - (dy?.getTime() || 0);
+  });
+
+  // Zaduženje bez zabeleženih pojedinačnih vožnji (npr. iz perioda pre
+  // uvođenja koncepta "vožnji") — tretiraj celo zaduženje kao jednu vožnju,
+  // da ništa ne "nestane" iz istorije.
+  if (trips.length === 0) {
+    trips = [{
+      id: `legacy-${a.id}`, _legacy: true,
+      startDate: a.startDate, endDate: a.endDate,
+      startKm: a.startKm, endKm: a.endKm,
+      tripType: a.tripType, destination: a.destination, route: a.route,
+      reason: a.reason, notes: a.unassignNotes || null, status: a.status,
+    }];
+  }
+
+  // Unosi bez tripId (nastali pre uvođenja vožnji) — pripoji ih prvoj
+  // vožnji da se ne bi izgubili iz prikaza.
+  const orphanEntries = assignmentEntries.filter(e => !e.tripId);
+
+  const km = trips.reduce((s, tr) =>
+    s + ((tr.endKm != null && tr.startKm != null) ? (tr.endKm - tr.startKm) : 0), 0);
+  const fuelEntries   = assignmentEntries.filter(e => e.type === "fuel");
+  const totalFuelL    = fuelEntries.reduce((s, e) => s + (e.fuelAmount || 0), 0);
+  const totalFuelCost = fuelEntries.reduce((s, e) => s + (e.fuelCost || 0), 0);
+  const totalOtherCost = assignmentEntries
+    .filter(e => ["toll", "parking", "washing", "other_cost"].includes(e.type))
+    .reduce((s, e) => s + (e.amount || 0), 0);
+  const incidentCount = assignmentEntries.filter(e => ["fault", "damage", "accident"].includes(e.type)).length;
+
+  // Ukupna km od-do za CELO zaduženje: početna km prve vožnje i krajnja
+  // km poslednje (trips je već hronološki sortiran gore).
+  const firstTrip = trips[0];
+  const lastTrip   = trips[trips.length - 1];
+  const assignmentStartKm = firstTrip?.startKm ?? a.startKm ?? null;
+  const assignmentEndKm   = lastTrip?.endKm ?? a.endKm ?? null;
+
+  return `
+    <div class="assignment-history-card">
+      <div class="assignment-history-card__header" data-toggle-assignment>
+        <div>
+          <div class="trip-history-card__vehicle">
+            🚗 <strong>${a.vehicleBrand || ""} ${a.vehicleModel || ""}</strong> — ${a.vehiclePlate || ""}
+          </div>
+          <div class="trip-history-card__dates">📅 ${formatDate(a.startDate)} → ${formatDate(a.endDate)}</div>
+          <div class="trip-history-card__km-range">
+            🛣️ ${assignmentStartKm?.toLocaleString() ?? "—"} → ${assignmentEndKm != null ? assignmentEndKm.toLocaleString() : t("assignment_status_active")} km
+          </div>
+        </div>
+        <div class="trip-history-card__summary">
+          <span class="trip-history-badge">🔑 ${trips.length} ${t("driver_trips_count")}</span>
+          ${incidentCount > 0 ? `<span class="trip-history-badge trip-history-badge--warn">⚠️ ${incidentCount}</span>` : ""}
+          <span class="trip-history-card__chevron">▾</span>
+        </div>
+      </div>
+
+      <div class="assignment-history-card__trips hidden">
+        ${trips.map((trip, idx) => {
+          const entries = trip._legacy
+            ? assignmentEntries
+            : [...(entriesByTrip[trip.id] || []), ...(idx === 0 ? orphanEntries : [])];
+          return tripHistoryCard(trip, entries, idx + 1);
+        }).join("")}
+      </div>
+
+      <div class="assignment-history-summary">
+        <div class="assignment-history-summary__item">
+          <span class="assignment-history-summary__value">${km.toLocaleString()} km</span>
+          <span class="assignment-history-summary__label">${t("assignment_summary_km")}</span>
+        </div>
+        <div class="assignment-history-summary__item">
+          <span class="assignment-history-summary__value">${totalFuelL.toFixed(1)} L</span>
+          <span class="assignment-history-summary__label">${t("trip_stats_fuel")}</span>
+        </div>
+        <div class="assignment-history-summary__item">
+          <span class="assignment-history-summary__value">${(totalFuelCost + totalOtherCost).toLocaleString()} RSD</span>
+          <span class="assignment-history-summary__label">${t("assignment_summary_costs")}</span>
+        </div>
+        <div class="assignment-history-summary__item ${incidentCount > 0 ? "assignment-history-summary__item--warn" : ""}">
+          <span class="assignment-history-summary__value">${incidentCount}</span>
+          <span class="assignment-history-summary__label">${t("trip_stats_incidents")}</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ── ISTORIJA — kartica JEDNE VOŽNJE (klik = detalji/unosi) ─────
+function tripHistoryCard(trip, entries, index) {
+  const km = (trip.endKm != null && trip.startKm != null) ? (trip.endKm - trip.startKm) : null;
 
   const fuelEntries = entries.filter(e => e.type === "fuel");
   const costEntries  = entries.filter(e => ["toll", "parking", "washing", "other_cost"].includes(e.type));
@@ -157,12 +270,13 @@ function historyAssignmentCard(a, entries) {
 
   return `
     <div class="trip-history-card">
-      <div class="trip-history-card__header" data-toggle-history>
+      <div class="trip-history-card__header" data-toggle-trip>
         <div>
-          <div class="trip-history-card__vehicle">
-            🚗 <strong>${a.vehicleBrand || ""} ${a.vehicleModel || ""}</strong> — ${a.vehiclePlate || ""}
+          <div class="trip-history-card__vehicle">🔑 ${t("driver_trip_label")} ${index}</div>
+          <div class="trip-history-card__dates">📅 ${formatDate(trip.startDate)} → ${trip.endDate ? formatDate(trip.endDate) : t("assignment_status_active")}</div>
+          <div class="trip-history-card__km-range">
+            🛣️ ${trip.startKm?.toLocaleString() ?? "—"} → ${trip.endKm != null ? trip.endKm.toLocaleString() : t("assignment_status_active")} km
           </div>
-          <div class="trip-history-card__dates">📅 ${formatDate(a.startDate)} → ${formatDate(a.endDate)}</div>
         </div>
         <div class="trip-history-card__summary">
           ${badges}
@@ -172,12 +286,12 @@ function historyAssignmentCard(a, entries) {
 
       <div class="trip-history-card__details hidden">
         <div class="trip-history-card__km">
-          🛣️ ${a.startKm?.toLocaleString() ?? "—"} → ${a.endKm?.toLocaleString() ?? "—"} km
+          🛣️ ${trip.startKm?.toLocaleString() ?? "—"} → ${trip.endKm?.toLocaleString() ?? "—"} km
           ${km != null ? `<strong> (${km.toLocaleString()} km)</strong>` : ""}
         </div>
-        ${a.tripType === "intercity" && a.destination ? `<div class="trip-history-card__dest">📍 ${a.destination}</div>` : ""}
-        ${a.reason ? `<div class="trip-history-card__reason">${a.reason}</div>` : ""}
-        ${a.unassignNotes ? `<div class="trip-history-card__notes">${a.unassignNotes}</div>` : ""}
+        ${trip.tripType === "intercity" && trip.destination ? `<div class="trip-history-card__dest">📍 ${trip.destination}</div>` : ""}
+        ${trip.reason ? `<div class="trip-history-card__reason">${trip.reason}</div>` : ""}
+        ${trip.notes ? `<div class="trip-history-card__notes">${trip.notes}</div>` : ""}
 
         ${entries.length === 0
           ? `<p class="trip-history-card__empty">${t("trip_no_entries")}</p>`
@@ -226,10 +340,20 @@ function historyEntryItem(entry) {
   `;
 }
 
-// Klik na header kartice istorije → toggluje prikaz detalja
-function attachDriverHistoryEvents() {
-  document.querySelectorAll("[data-toggle-history]").forEach(header => {
+// Klik na header kartice ZADUŽENJA → toggluje listu vožnji;
+// klik na header kartice VOŽNJE → toggluje njene detalje/unose.
+// Eksportovano — koristi ga i drivers.js (admin prikaz vozača).
+export function attachAssignmentHistoryEvents(container = document) {
+  container.querySelectorAll("[data-toggle-assignment]").forEach(header => {
     header.addEventListener("click", () => {
+      const tripsBox = header.parentElement.querySelector(".assignment-history-card__trips");
+      tripsBox?.classList.toggle("hidden");
+      header.classList.toggle("assignment-history-card__header--open");
+    });
+  });
+  container.querySelectorAll("[data-toggle-trip]").forEach(header => {
+    header.addEventListener("click", (e) => {
+      e.stopPropagation();
       const details = header.parentElement.querySelector(".trip-history-card__details");
       details?.classList.toggle("hidden");
       header.classList.toggle("trip-history-card__header--open");
