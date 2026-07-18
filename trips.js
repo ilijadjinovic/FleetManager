@@ -12,6 +12,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { t, getCurrentLang } from "./i18n.js";
 import { S } from "./app.js";
+import { fuelLevelLabel, fuelLevelColorClass } from "./vehicles.js";
 
 // ── GLAVNI RENDER ─────────────────────────────────────────────
 export async function renderTrips(container) {
@@ -46,7 +47,8 @@ async function renderDriverHistoryView(container) {
   attachAssignmentHistoryEvents(container);
 }
 
-// ── UČITAJ ISTORIJU ZADUŽENJA (zatvorena) + VOŽNJE + SVE UNOSE ──
+// ── UČITAJ ISTORIJU ZADUŽENJA (zatvorena + aktivna sa bar jednom
+//    zatvorenom vožnjom) + VOŽNJE + SVE UNOSE ──────────────────
 async function loadTripHistory() {
   const { assignments, tripsByAssignment, entriesByTrip, entriesByAssignment } =
     await loadDriverAssignmentHistory({
@@ -54,31 +56,60 @@ async function loadTripHistory() {
       fallbackField: "driverId", fallbackValue: S.profile?.driverId,
     });
 
-  const pastAssignments = assignments.filter(a => a.status === "closed");
+  // Zaduženje se prikazuje ovde ako je zatvoreno, ILI ako je i dalje
+  // aktivno ali već ima bar jednu ZATVORENU vožnju unutar sebe — inače
+  // bi ta zatvorena vožnja ostala nevidljiva sve dok se ne zatvori celo
+  // zaduženje (npr. vozač zatvori vožnju da bi krenuo na sledeću, ali
+  // vozilo ostaje zaduženo). Zaduženje koje ima SAMO trenutnu, još
+  // otvorenu vožnju ostaje isključivo na tabu "Pregled" — ovde bi bilo
+  // prazno i zbunjujuće.
+  const pastAssignments = assignments.filter(a => {
+    if (a.status === "closed") return true;
+    const trips = tripsByAssignment[a.id] || [];
+    return trips.some(tr => tr.status === "closed");
+  });
+
   return { pastAssignments, tripsByAssignment, entriesByTrip, entriesByAssignment };
 }
 
 // ── GENERALIZOVANI UČITAVAČ ISTORIJE (koristi ga i drivers.js za
 //    prikaz zaduženja/vožnji konkretnog vozača iz admin panela) ───
-// primaryField/primaryValue se pokušava prvo; ako ne vrati ništa i
-// fallbackValue je zadat, pokušava se i fallbackField (isti obrazac
-// koji je ranije korišćen samo za vozačev sopstveni prikaz).
+// Podaci su istorijski mešoviti — neki dokumenti imaju popunjen
+// driverUid, neki samo driverId (npr. prva vožnja koju admin auto-
+// matski kreira uz zaduženje, kod vozača bez lokalnog/Google naloga
+// u tom trenutku). Zato se OBA upita uvek pokreću i rezultati
+// spajaju (bez duplikata po id-ju) — raniji "sve ili ništa" fallback
+// (pokušaj fallbackField SAMO ako primaryField vrati 0 rezultata)
+// je tiho gubio dokumente koji su se poklapali samo po jednom od ta
+// dva polja, čim bi bar jedan dokument uspešno pogodio primaryField.
 export async function loadDriverAssignmentHistory({ primaryField, primaryValue, fallbackField, fallbackValue }) {
   async function fetchWithFallback(collName, orderField, orderDir) {
-    let snap = primaryValue ? await getDocs(query(
-      collection(db, "companies", S.companyId, collName),
-      where(primaryField, "==", primaryValue),
-      orderBy(orderField, orderDir)
-    )).catch(() => ({ docs: [] })) : { docs: [] };
+    const byId = new Map();
 
-    if (snap.docs.length === 0 && fallbackValue) {
-      snap = await getDocs(query(
-        collection(db, "companies", S.companyId, collName),
-        where(fallbackField, "==", fallbackValue),
-        orderBy(orderField, orderDir)
-      )).catch(() => ({ docs: [] }));
+    async function runQuery(field, value) {
+      if (!value) return;
+      try {
+        const snap = await getDocs(query(
+          collection(db, "companies", S.companyId, collName),
+          where(field, "==", value),
+          orderBy(orderField, orderDir)
+        ));
+        snap.docs.forEach(d => byId.set(d.id, { id: d.id, ...d.data() }));
+      } catch (e) {
+        console.error(`fetchWithFallback(${collName}, ${field}) failed:`, e);
+      }
     }
-    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    await runQuery(primaryField, primaryValue);
+    await runQuery(fallbackField, fallbackValue);
+
+    const list = [...byId.values()];
+    list.sort((a, b) => {
+      const ta = toMillis(a[orderField]);
+      const tb = toMillis(b[orderField]);
+      return orderDir === "desc" ? tb - ta : ta - tb;
+    });
+    return list;
   }
 
   let assignments = [], trips = [], entries = [];
@@ -177,7 +208,7 @@ export function historyAssignmentCard(a, tripsByAssignment, entriesByTrip, entri
     trips = [{
       id: `legacy-${a.id}`, _legacy: true,
       startDate: a.startDate, endDate: a.endDate,
-      startKm: a.startKm, endKm: a.endKm,
+      startKm: a.startKm, endKm: a.endKm, fuelLevel: a.fuelLevel || null,
       tripType: a.tripType, destination: a.destination, route: a.route,
       reason: a.reason, notes: a.unassignNotes || null, status: a.status,
     }];
@@ -205,18 +236,19 @@ export function historyAssignmentCard(a, tripsByAssignment, entriesByTrip, entri
   const assignmentEndKm   = lastTrip?.endKm ?? a.endKm ?? null;
 
   return `
-    <div class="assignment-history-card">
+    <div class="assignment-history-card ${a.status !== "closed" ? "assignment-history-card--active" : ""}">
       <div class="assignment-history-card__header" data-toggle-assignment>
         <div>
           <div class="trip-history-card__vehicle">
             🚗 <strong>${a.vehicleBrand || ""} ${a.vehicleModel || ""}</strong> — ${a.vehiclePlate || ""}
           </div>
-          <div class="trip-history-card__dates">📅 ${formatDate(a.startDate)} → ${formatDate(a.endDate)}</div>
+          <div class="trip-history-card__dates">📅 ${formatDate(a.startDate)} → ${a.status === "closed" ? formatDate(a.endDate) : t("assignment_status_active")}</div>
           <div class="trip-history-card__km-range">
             🛣️ ${assignmentStartKm?.toLocaleString() ?? "—"} → ${assignmentEndKm != null ? assignmentEndKm.toLocaleString() : t("assignment_status_active")} km
           </div>
         </div>
         <div class="trip-history-card__summary">
+          ${a.status !== "closed" ? `<span class="trip-history-badge trip-history-badge--active">🟢 ${t("assignment_status_active")}</span>` : ""}
           <span class="trip-history-badge">🔑 ${trips.length} ${t("driver_trips_count")}</span>
           ${incidentCount > 0 ? `<span class="trip-history-badge trip-history-badge--warn">⚠️ ${incidentCount}</span>` : ""}
           <span class="trip-history-card__chevron">▾</span>
@@ -289,6 +321,7 @@ function tripHistoryCard(trip, entries, index) {
           🛣️ ${trip.startKm?.toLocaleString() ?? "—"} → ${trip.endKm?.toLocaleString() ?? "—"} km
           ${km != null ? `<strong> (${km.toLocaleString()} km)</strong>` : ""}
         </div>
+        ${trip.fuelLevel ? `<div class="trip-history-card__fuel">⛽ <span class="fuel-level-text--${fuelLevelColorClass(trip.fuelLevel)}">${fuelLevelLabel(trip.fuelLevel)}</span></div>` : ""}
         ${trip.tripType === "intercity" && trip.destination ? `<div class="trip-history-card__dest">📍 ${trip.destination}</div>` : ""}
         ${trip.reason ? `<div class="trip-history-card__reason">${trip.reason}</div>` : ""}
         ${trip.notes ? `<div class="trip-history-card__notes">${trip.notes}</div>` : ""}
@@ -365,6 +398,13 @@ function toJsDate(val) {
   if (!val) return null;
   const d = val.toDate ? val.toDate() : new Date(val);
   return isNaN(d) ? null : d;
+}
+
+function toMillis(val) {
+  if (!val) return 0;
+  if (val.toMillis) return val.toMillis();
+  const d = new Date(val);
+  return isNaN(d) ? 0 : d.getTime();
 }
 
 // ── ENTRY CARD ────────────────────────────────────────────────

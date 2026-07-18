@@ -10,6 +10,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { t, getCurrentLang } from "./i18n.js";
 import { S, showToast, openModal } from "./app.js";
+import { fuelLevelLabel } from "./vehicles.js";
 
 // ── STANJE MODULA ─────────────────────────────────────────────
 let allAssignments = [];
@@ -188,6 +189,12 @@ function assignmentCard(a, canEdit) {
         ${a.kmMismatch ? `
           <div class="assignment-card__mismatch">
             ⚠️ ${t("assignment_km_mismatch_detail").replace("{0}", a.driverStartKm?.toLocaleString() || "?").replace("{1}", a.startKm?.toLocaleString() || "?")}
+          </div>
+        ` : ""}
+
+        ${a.fuelLevelMismatch ? `
+          <div class="assignment-card__mismatch">
+            ⛽ ${t("assignment_fuel_mismatch_detail").replace("{0}", fuelLevelLabel(a.fuelLevelConfirmedValue) || "?").replace("{1}", fuelLevelLabel(a.systemFuelLevel) || "?")}
           </div>
         ` : ""}
       </div>
@@ -386,6 +393,10 @@ function vehicleInfoBox(vehicle) {
       <div class="vehicle-info-box__row">
         <span class="vehicle-info-box__label">${t("assignment_vehicle_last_km")}</span>
         <span><strong>${vehicle.currentKm ? vehicle.currentKm.toLocaleString() + " km" : "—"}</strong></span>
+      </div>
+      <div class="vehicle-info-box__row">
+        <span class="vehicle-info-box__label">${t("vehicle_fuel_level")}</span>
+        <span>${vehicle.fuelLevel ? "⛽ " + fuelLevelLabel(vehicle.fuelLevel) : "—"}</span>
       </div>
       <div class="vehicle-info-box__row">
         <span class="vehicle-info-box__label">${t("assignment_vehicle_reg")}</span>

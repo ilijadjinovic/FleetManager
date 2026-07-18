@@ -20,6 +20,7 @@ let filterType    = "all";
 let filterStatus  = "all";
 let searchTerm    = "";
 let onSavedCallback = null; // opcioni hook — poziva se posle uspešnog snimanja (npr. iz trips.js)
+let formAssignmentId = null; // zaduženje za koje se trenutno otvorena forma prijave vezuje
 
 // ── GLAVNI RENDER ─────────────────────────────────────────────
 export async function renderIncidents(container) {
@@ -31,8 +32,10 @@ export async function renderIncidents(container) {
   const isDriver = S.profile?.role === "driver";
   const canEdit  = !isDriver;
 
-  // Vozač sme da prijavi samo u okviru trenutnog aktivnog zaduženja
-  const hasActiveAssignment = isDriver ? await driverHasActiveAssignment() : false;
+  // Vozač sme da prijavi samo u okviru trenutnog aktivnog zaduženja —
+  // može ih imati i više istovremeno (npr. dva vozila).
+  const activeAssignments = isDriver ? await getDriverActiveAssignments() : [];
+  const hasActiveAssignment = activeAssignments.length > 0;
   const canReport = isDriver && hasActiveAssignment;
 
   container.innerHTML = `
@@ -280,51 +283,83 @@ export function scheduleServiceForIncident(inc, onSaved) {
   });
 }
 
-// ── DA LI VOZAČ IMA AKTIVNO ZADUŽENJE ──────────────────────────
-async function driverHasActiveAssignment() {
+// ── TRENUTNA KM ZA DATO ZADUŽENJE (km vozila ako postoji, inače startKm) ──
+async function resolveCurrentKm(assignment) {
+  let km = assignment.startKm ?? null;
+  if (assignment.vehicleId) {
+    try {
+      const vehSnap = await getDoc(doc(db, "companies", S.companyId, "vehicles", assignment.vehicleId));
+      if (vehSnap.exists() && vehSnap.data().currentKm != null) km = vehSnap.data().currentKm;
+    } catch (e) { /* ignoriši */ }
+  }
+  return km;
+}
+
+// ── AKTIVNA ZADUŽENJA VOZAČA (može ih biti i više istovremeno) ──
+async function getDriverActiveAssignments() {
   try {
     const snap = await getDocs(query(
       collection(db, "companies", S.companyId, "assignments"),
       where("driverUid", "==", S.user.uid),
       where("status", "==", "active")
     ));
-    return !snap.empty;
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
   } catch (e) {
-    console.error("driverHasActiveAssignment error:", e);
-    return false;
+    console.error("getDriverActiveAssignments error:", e);
+    return [];
   }
 }
 
 // ── FORMA ZA NOVU PRIJAVU ─────────────────────────────────────
-// prefillType: unapred izabran tip (npr. kad se poziva sa dugmeta "⚠️" u Mojim vožnjama)
-// onSaved:     opciona callback funkcija — poziva se posle uspešnog snimanja
-//              (koristi je npr. trips.js da osveži svoju listu unosa)
-export async function openIncidentForm(prefillType = null, onSaved = null) {
+// prefillType:       unapred izabran tip (npr. kad se poziva sa dugmeta "⚠️" u Mojim vožnjama)
+// onSaved:           opciona callback funkcija — poziva se posle uspešnog snimanja
+//                     (koristi je npr. dashboard.js/trips.js da osveži svoju listu unosa)
+// forcedAssignmentId: ako je forma otvorena sa konkretne kartice vozila (npr. na tabu
+//                     "Pregled" kad vozač ima više zaduženih vozila istovremeno), prosleđuje
+//                     se ID tog zaduženja da prijava sigurno ide na to vozilo, bez nagađanja.
+//                     Ako nije prosleđen a vozač ima više aktivnih zaduženja, forma nudi
+//                     izbor vozila.
+export async function openIncidentForm(prefillType = null, onSaved = null, forcedAssignmentId = null) {
   onSavedCallback = onSaved;
+  formAssignmentId = forcedAssignmentId;
 
-  // Predpopuni km polje trenutnom km vozila (ako vozač ima aktivno zaduženje)
+  // Predpopuni km polje i pripremi izbor vozila (ako vozač ima aktivno
+  // zaduženje/zaduženja)
   let prefillCurrentKm = null;
+  let vehiclePickerHTML = "";
   if (S.profile?.role === "driver") {
     try {
-      const assignSnap = await getDocs(query(
-        collection(db, "companies", S.companyId, "assignments"),
-        where("driverUid", "==", S.user.uid),
-        where("status", "==", "active")
-      ));
-      if (!assignSnap.empty) {
-        const a = assignSnap.docs[0].data();
-        prefillCurrentKm = a.startKm ?? null;
-        if (a.vehicleId) {
-          const vehSnap = await getDoc(doc(db, "companies", S.companyId, "vehicles", a.vehicleId));
-          if (vehSnap.exists() && vehSnap.data().currentKm != null) {
-            prefillCurrentKm = vehSnap.data().currentKm;
-          }
-        }
+      const activeAssignments = await getDriverActiveAssignments();
+
+      if (forcedAssignmentId) {
+        // Zaduženje je već poznato (kliknuto je dugme na konkretnoj kartici) —
+        // samo dohvati km za predpopunu, bez ikakvog nagađanja/izbora.
+        const a = activeAssignments.find(x => x.id === forcedAssignmentId);
+        if (a) prefillCurrentKm = await resolveCurrentKm(a);
+      } else if (activeAssignments.length === 1) {
+        formAssignmentId = activeAssignments[0].id;
+        prefillCurrentKm = await resolveCurrentKm(activeAssignments[0]);
+      } else if (activeAssignments.length > 1) {
+        // Vozač ima više zaduženih vozila istovremeno — mora da izabere
+        // za koje vozilo prijavljuje kvar/oštećenje/nezgodu.
+        formAssignmentId = activeAssignments[0].id;
+        prefillCurrentKm = await resolveCurrentKm(activeAssignments[0]);
+        vehiclePickerHTML = `
+          <div class="form-group">
+            <label class="form-label">${t("assignment_vehicle")} *</label>
+            <select id="inc-assignment" class="form-select">
+              ${activeAssignments.map(a => `
+                <option value="${a.id}">${a.vehicleBrand} ${a.vehicleModel} — ${a.vehiclePlate}</option>
+              `).join("")}
+            </select>
+          </div>
+        `;
       }
     } catch (e) { /* ignoriši — polje ostaje prazno, vozač unosi ručno */ }
   }
 
   const bodyHTML = `
+    ${vehiclePickerHTML}
     <div class="form-section-title">${t("incident_type")}</div>
     <div class="incident-type-grid">
       <label class="incident-type-btn ${prefillType === 'fault' ? 'incident-type-btn--active' : ''}">
@@ -413,6 +448,16 @@ export async function openIncidentForm(prefillType = null, onSaved = null) {
     if (prefillType === "accident") {
       document.getElementById("accident-fields")?.classList.remove("hidden");
     }
+
+    // Izbor vozila (kad ih ima više) — promena menja koje se zaduženje
+    // koristi pri čuvanju i osvežava predpopunjenu km.
+    document.getElementById("inc-assignment")?.addEventListener("change", async (e) => {
+      formAssignmentId = e.target.value;
+      const activeAssignments = await getDriverActiveAssignments();
+      const a = activeAssignments.find(x => x.id === formAssignmentId);
+      const kmInput = document.getElementById("inc-km");
+      if (a && kmInput) kmInput.value = (await resolveCurrentKm(a)) || "";
+    });
   }, 100);
 }
 
@@ -427,38 +472,41 @@ async function saveIncident() {
     return;
   }
 
-  // Dohvati aktivno zaduženje vozača (i vozilo, radi validacije km)
+  // Dohvati IZABRANO aktivno zaduženje vozača (i vozilo, radi validacije km).
+  // formAssignmentId je postavljen kad je forma otvorena — ili prosleđen
+  // spolja (klik na konkretnu karticu vozila), ili automatski (jedno
+  // aktivno zaduženje), ili izabran iz padajuće liste (više zaduženja).
   let vehiclePlate = null, vehicleId = null, assignmentId = null, tripId = null,
       driverId = null, vehicleCurrentKm = null, assignmentStartKm = null;
 
   if (S.profile?.role === "driver") {
     try {
-      const assignSnap = await getDocs(query(
-        collection(db, "companies", S.companyId, "assignments"),
-        where("driverUid", "==", S.user.uid),
-        where("status", "==", "active")
-      ));
-      if (!assignSnap.empty) {
-        const a = assignSnap.docs[0].data();
-        vehiclePlate     = a.vehiclePlate;
-        vehicleId        = a.vehicleId;
-        assignmentId     = assignSnap.docs[0].id;
-        assignmentStartKm = a.startKm ?? null;
+      assignmentId = formAssignmentId;
+      if (assignmentId) {
+        const assignDoc = await getDoc(doc(db, "companies", S.companyId, "assignments", assignmentId));
+        if (assignDoc.exists() && assignDoc.data().status === "active") {
+          const a = assignDoc.data();
+          vehiclePlate      = a.vehiclePlate;
+          vehicleId         = a.vehicleId;
+          assignmentStartKm = a.startKm ?? null;
 
-        // Pronađi trenutno aktivnu vožnju unutar ovog zaduženja — prijava
-        // se vezuje i za konkretnu vožnju, ne samo za zaduženje uopšte.
-        try {
-          const tripSnap = await getDocs(query(
-            collection(db, "companies", S.companyId, "trips"),
-            where("assignmentId", "==", assignmentId),
-            where("status", "==", "active")
-          ));
-          if (!tripSnap.empty) tripId = tripSnap.docs[0].id;
-        } catch (e) { /* ignoriši */ }
+          // Pronađi trenutno aktivnu vožnju unutar OVOG zaduženja — prijava
+          // se vezuje i za konkretnu vožnju, ne samo za zaduženje uopšte.
+          try {
+            const tripSnap = await getDocs(query(
+              collection(db, "companies", S.companyId, "trips"),
+              where("assignmentId", "==", assignmentId),
+              where("status", "==", "active")
+            ));
+            if (!tripSnap.empty) tripId = tripSnap.docs[0].id;
+          } catch (e) { /* ignoriši */ }
 
-        if (vehicleId) {
-          const vehSnap = await getDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId));
-          if (vehSnap.exists()) vehicleCurrentKm = vehSnap.data().currentKm ?? null;
+          if (vehicleId) {
+            const vehSnap = await getDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId));
+            if (vehSnap.exists()) vehicleCurrentKm = vehSnap.data().currentKm ?? null;
+          }
+        } else {
+          assignmentId = null; // zaduženje je u međuvremenu zatvoreno
         }
       }
       driverId = S.profile.driverId;
@@ -548,6 +596,7 @@ async function saveIncident() {
 
     if (typeof onSavedCallback === "function") await onSavedCallback();
     onSavedCallback = null;
+    formAssignmentId = null;
   } catch (e) {
     const err = document.getElementById("incident-form-error");
     if (err) { err.textContent = `${t("error")}: ${e.message}`; err.classList.remove("hidden"); }

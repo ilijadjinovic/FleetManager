@@ -12,7 +12,7 @@ export function renderLogin() {
   screen.innerHTML = `
     <div class="login-card">
       <div class="login-card__logo">
-        <span class="login-card__logo-icon">🚛</span>
+        <img src="./assets/icon-192.png" alt="${t("app_name")}" class="login-card__logo-icon" />
         <h1 class="login-card__title">${t("app_name")}</h1>
       </div>
 

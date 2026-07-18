@@ -1,6 +1,6 @@
 {
-  "name": "Fleet Manager",
-  "short_name": "Fleet",
+  "name": "Fleet Manager v1.0",
+  "short_name": "Fleet Manager",
   "description": "Evidencija i upravljanje voznim parkom",
   "start_url": "./",
   "display": "standalone",

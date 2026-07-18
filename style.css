@@ -28,6 +28,34 @@
   --color-nav-bg:      #111d30;
   --color-nav-active:  #3d7eff;
 
+  /* Neutralna/"muted" boja — ranije zakucana kao hex na 4 mesta
+     (badge, stat-card, login-chip); sad na jednom mestu. */
+  --color-slate:        #94a3b8;
+  --color-slate-dark:   #64748b;
+  --color-slate-darker: #475569;
+
+  /* Akcentne boje bez success/warning/danger semantike. */
+  --color-orange: #f97316;
+  --color-purple: #8b5cf6;
+
+  /* Hover varijante dugmadi. */
+  --color-danger-hover:  #c93333;
+  --color-warning-hover: #d97706;
+
+  /* "Soft" (providne) verzije boja za pozadine badge-ova, upozorenja,
+     obojenih kartica i sl. — jedno mesto za rgba() tonove koji su se
+     ranije ponavljali doslovno na desetak mesta u fajlu. */
+  --color-success-soft: rgba(34,197,94,0.15);
+  --color-warning-soft: rgba(245,158,11,0.15);
+  --color-danger-soft:  rgba(239,68,68,0.15);
+  --color-info-soft:    rgba(6,182,212,0.15);
+  --color-slate-soft:   rgba(148,163,184,0.15);
+  --color-primary-soft: rgba(61,126,255,0.08);
+
+  --color-danger-bg-faint:     rgba(239,68,68,0.1);
+  --color-warning-bg-faint:    rgba(245,158,11,0.08);
+  --color-warning-border-soft: rgba(245,158,11,0.3);
+
   --radius-sm:   6px;
   --radius-md:   10px;
   --radius-lg:   16px;
@@ -90,9 +118,11 @@ body {
 }
 
 .login-card__logo-icon {
-  font-size: 48px;
+  width: 64px;
+  height: 64px;
   display: block;
-  margin-bottom: 8px;
+  margin: 0 auto 8px;
+  border-radius: 14px;
 }
 
 .login-card__title {
@@ -125,7 +155,7 @@ body {
   font-size: 13px;
   text-align: center;
   padding: 8px;
-  background: rgba(239,68,68,0.1);
+  background: var(--color-danger-bg-faint);
   border-radius: var(--radius-sm);
 }
 
@@ -287,10 +317,10 @@ body {
 .btn--secondary:hover:not(:disabled) { background: var(--color-surface-3); }
 
 .btn--danger { background: var(--color-danger); color: #fff; }
-.btn--danger:hover:not(:disabled) { background: #c93333; }
+.btn--danger:hover:not(:disabled) { background: var(--color-danger-hover); }
 
 .btn--warning { background: var(--color-warning); color: #000; }
-.btn--warning:hover:not(:disabled) { background: #d97706; }
+.btn--warning:hover:not(:disabled) { background: var(--color-warning-hover); }
 
 .btn--ghost { background: none; color: var(--color-text-muted); }
 .btn--ghost:hover { color: var(--color-text); background: rgba(255,255,255,0.06); }
@@ -411,10 +441,39 @@ body {
 }
 
 /* ── CARDS ──────────────────────────────────────────────── */
-.card {
+/* Zajednička osnova za sve "surface" kartice u aplikaciji — pozadina,
+   okvir i zaobljenje su identični na ~19 mesta u fajlu; svaka kartica
+   ispod dodaje samo ono što je njoj specifično (padding, layout, hover). */
+.card,
+.stat-card,
+.dashboard-panel,
+.about-card,
+.vehicle-card-preview,
+.company-card,
+.servicer-card,
+.vehicle-card,
+.driver-card,
+.assignment-card,
+.trip-vehicle-card,
+.trip-history-card,
+.assignment-history-card,
+.incident-card,
+.profile-header,
+.profile-section,
+.report-card {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
+}
+
+.trip-stat-box,
+.trip-entry-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.card {
   padding: 16px;
   box-shadow: var(--shadow-sm);
 }
@@ -453,9 +512,6 @@ body {
 }
 
 .stat-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 16px;
   text-align: center;
   cursor: pointer;
@@ -475,10 +531,10 @@ body {
 .stat-card--active::before { background: var(--color-success); }
 .stat-card--service::before{ background: var(--color-warning); }
 .stat-card--unreg::before  { background: var(--color-danger); }
-.stat-card--broken::before  { background: #f97316; }
-.stat-card--inactive::before{ background: #94a3b8; }
-.stat-card--assigned::before{ background: #8b5cf6; }
-.stat-card--archived::before{ background: #64748b; }
+.stat-card--broken::before  { background: var(--color-orange); }
+.stat-card--inactive::before{ background: var(--color-slate); }
+.stat-card--assigned::before{ background: var(--color-purple); }
+.stat-card--archived::before{ background: var(--color-slate-dark); }
 .stat-card--warn::before    { background: var(--color-warning); }
 
 .stat-card__value {
@@ -505,9 +561,6 @@ body {
 }
 
 .dashboard-panel {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 16px;
 }
 
@@ -522,9 +575,6 @@ body {
 
 /* ── O APLIKACIJI ──────────────────────────────────────────── */
 .about-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 16px;
   margin-top: 16px;
 }
@@ -578,6 +628,7 @@ body {
 .upcoming-item__main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .upcoming-item__name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .upcoming-item__plate { font-size: 11px; color: var(--color-text-muted); font-family: var(--font-mono); }
+.upcoming-item__kind { font-size: 11px; color: var(--color-text-muted); margin-left: 4px; }
 .upcoming-item__right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0; }
 .upcoming-item__date { font-size: 12px; color: var(--color-text-muted); }
 .upcoming-item__days { font-size: 12px; font-weight: 700; color: var(--color-warning); }
@@ -643,14 +694,55 @@ tbody td {
   font-weight: 700;
   white-space: nowrap;
 }
-.badge--active   { background: rgba(34,197,94,0.15); color: var(--color-success); }
-.badge--service  { background: rgba(245,158,11,0.15); color: var(--color-warning); }
-.badge--broken   { background: rgba(239,68,68,0.15);  color: var(--color-danger); }
-.badge--unreg    { background: rgba(148,163,184,0.15); color: #94a3b8; }
-.badge--inactive { background: rgba(148,163,184,0.1);  color: #64748b; }
-.badge--info     { background: rgba(6,182,212,0.15);   color: var(--color-info); }
-.badge--cancelled{ background: rgba(148,163,184,0.15);  color: #94a3b8; }
-.badge--danger   { background: rgba(239,68,68,0.15);   color: var(--color-danger); }
+.badge--active   { background: var(--color-success-soft); color: var(--color-success); }
+.badge--service  { background: var(--color-warning-soft); color: var(--color-warning); }
+.badge--broken   { background: var(--color-danger-soft); color: var(--color-danger); }
+.badge--unreg    { background: var(--color-slate-soft); color: var(--color-slate); }
+.badge--inactive { background: var(--color-slate-soft); color: var(--color-slate-dark); }
+.badge--info     { background: var(--color-info-soft); color: var(--color-info); }
+.badge--cancelled{ background: var(--color-slate-soft); color: var(--color-slate); }
+.badge--danger   { background: var(--color-danger-soft); color: var(--color-danger); }
+.badge--inline   { margin-left: 6px; }
+
+/* ── VOZILA: NIVO GORIVA U REZERVOARU ──────────────────────
+   Segmentirana skala (1/1, 3/4, 1/2, 1/4, rezerva) u formi vozila,
+   i tekstualni prikaz u detaljima — isti zeleno/žuto/crveno pravilo. */
+.fuel-level-scale {
+  display: flex;
+  gap: 6px;
+}
+.fuel-level-btn {
+  flex: 1;
+  padding: 8px 4px;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.fuel-level-btn:hover { border-color: var(--color-border-light); }
+.fuel-level-btn--green.fuel-level-btn--active {
+  border-color: var(--color-success);
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+.fuel-level-btn--yellow.fuel-level-btn--active {
+  border-color: var(--color-warning);
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+.fuel-level-btn--red.fuel-level-btn--active {
+  border-color: var(--color-danger);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+.fuel-level-text--green  { color: var(--color-success); font-weight: 700; }
+.fuel-level-text--yellow { color: var(--color-warning); font-weight: 700; }
+.fuel-level-text--red    { color: var(--color-danger);  font-weight: 700; }
 
 /* ── MODAL ──────────────────────────────────────────────── */
 .modal-overlay {
@@ -809,7 +901,7 @@ tbody td {
 .error-state {
   padding: 16px;
   color: var(--color-danger);
-  background: rgba(239,68,68,0.1);
+  background: var(--color-danger-bg-faint);
   border-radius: var(--radius-md);
   border: 1px solid rgba(239,68,68,0.3);
   font-size: 13px;
@@ -871,9 +963,6 @@ tbody td {
 .driver-assignments { display: flex; flex-direction: column; gap: 12px; }
 
 .vehicle-card-preview {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -996,7 +1085,7 @@ tbody td {
 .pib-lookup__row .form-input { flex: 1; }
 
 .pib-found {
-  background: rgba(61,126,255,0.08);
+  background: var(--color-primary-soft);
   border: 1px solid var(--color-primary);
   border-radius: var(--radius-md);
   padding: 12px 14px;
@@ -1079,8 +1168,8 @@ tbody td {
 
 /* ── PENDING BANNER (companies tab) ──────────────────────── */
 .pending-banner {
-  background: rgba(245,158,11,0.08);
-  border: 1px solid rgba(245,158,11,0.35);
+  background: var(--color-warning-bg-faint);
+  border: 1px solid var(--color-warning-border-soft);
   border-radius: var(--radius-lg);
   padding: 16px;
   margin-bottom: 20px;
@@ -1108,9 +1197,6 @@ tbody td {
 .companies-grid { display: flex; flex-direction: column; gap: 16px; }
 
 .company-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -1156,9 +1242,6 @@ tbody td {
 .servicer-list { display: flex; flex-direction: column; gap: 16px; }
 
 .servicer-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -1213,9 +1296,6 @@ tbody td {
 }
 
 .vehicle-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 14px;
   cursor: pointer;
   transition: all 0.15s;
@@ -1376,9 +1456,6 @@ tbody td {
 }
 
 .driver-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 14px;
   cursor: pointer;
   transition: all 0.15s;
@@ -1418,7 +1495,7 @@ tbody td {
 }
 .login-chip--google { background: rgba(66,133,244,0.12); color: #4285F4; border-color: #4285F4; }
 .login-chip--local  { background: rgba(34,197,94,0.12);  color: var(--color-success); border-color: var(--color-success); }
-.login-chip--none   { background: rgba(148,163,184,0.1); color: #64748b; border-color: #475569; }
+.login-chip--none   { background: var(--color-slate-soft); color: var(--color-slate-dark); border-color: var(--color-slate-darker); }
 
 .driver-card__actions {
   display: flex; flex-direction: column; gap: 4px;
@@ -1448,8 +1525,8 @@ tbody td {
 }
 
 .no-login-notice {
-  background: rgba(245,158,11,0.08);
-  border: 1px solid rgba(245,158,11,0.3);
+  background: var(--color-warning-bg-faint);
+  border: 1px solid var(--color-warning-border-soft);
   border-radius: var(--radius-md);
   padding: 12px 14px;
   font-size: 13px;
@@ -1467,6 +1544,18 @@ tbody td {
 .trip-stat { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .trip-stat__value { font-size: 20px; font-weight: 800; }
 .trip-stat__label { font-size: 11px; color: var(--color-text-muted); }
+
+.service-total-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 14px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+.service-total-bar strong { color: var(--color-primary); font-size: 14px; }
 
 .trips-list, .incidents-list { display: flex; flex-direction: column; gap: 8px; }
 
@@ -1537,8 +1626,8 @@ tbody td {
 .password-reveal__warning {
   font-size: 12px;
   color: var(--color-warning);
-  background: rgba(245,158,11,0.08);
-  border: 1px solid rgba(245,158,11,0.3);
+  background: var(--color-warning-bg-faint);
+  border: 1px solid var(--color-warning-border-soft);
   border-radius: var(--radius-sm);
   padding: 8px 12px;
   width: 100%;
@@ -1548,9 +1637,6 @@ tbody td {
 .assignments-list { display: flex; flex-direction: column; gap: 12px; }
 
 .assignment-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 14px;
   display: flex;
   gap: 12px;
@@ -1575,8 +1661,8 @@ tbody td {
 .assignment-card__route { font-size: 12px; color: var(--color-text-muted); }
 .assignment-card__mismatch {
   font-size: 12px; color: var(--color-warning);
-  background: rgba(245,158,11,0.08);
-  border: 1px solid rgba(245,158,11,0.3);
+  background: var(--color-warning-bg-faint);
+  border: 1px solid var(--color-warning-border-soft);
   border-radius: var(--radius-sm);
   padding: 6px 10px;
 }
@@ -1664,10 +1750,15 @@ tbody td {
 }
 
 /* ── TRIPS ───────────────────────────────────────────────── */
+/* Vozač može imati više aktivnih zaduženja (vozila) istovremeno —
+   svaki blok dobija razmak i liniju iznad, izuzev prvog. */
+.trip-assignment-block + .trip-assignment-block {
+  margin-top: 12px;
+  padding-top: 24px;
+  border-top: 2px solid var(--color-border);
+}
+
 .trip-vehicle-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 16px;
   margin-bottom: 16px;
   display: flex;
@@ -1731,9 +1822,6 @@ tbody td {
 @media (max-width: 480px) { .trip-stats { grid-template-columns: repeat(2, 1fr); } }
 
 .trip-stat-box {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
   padding: 12px;
   text-align: center;
 }
@@ -1756,9 +1844,6 @@ tbody td {
 .trip-entries-header h3 { font-size: 14px; font-weight: 700; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
 
 .trip-entry-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
@@ -1793,9 +1878,6 @@ tbody td {
 .trip-history-list { display: flex; flex-direction: column; gap: 10px; }
 
 .trip-history-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   overflow: hidden;
   transition: border-color 0.15s;
 }
@@ -1832,6 +1914,13 @@ tbody td {
 .trip-history-badge--warn {
   background: rgba(245,158,11,0.15);
   color: var(--color-warning);
+}
+.trip-history-badge--active {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+.assignment-history-card--active {
+  border: 1px solid var(--color-success);
 }
 
 .trip-history-card__chevron {
@@ -1904,9 +1993,6 @@ tbody td {
 
 /* ── Kartica ZADUŽENJA (sadrži više vožnji) ─────────────────── */
 .assignment-history-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   overflow: hidden;
   transition: border-color 0.15s;
 }
@@ -1995,9 +2081,6 @@ tbody td {
 .incidents-grid { display: flex; flex-direction: column; gap: 12px; }
 
 .incident-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -2105,9 +2188,6 @@ tbody td {
   display: flex;
   align-items: center;
   gap: 16px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 20px;
   margin-bottom: 20px;
 }
@@ -2127,9 +2207,6 @@ tbody td {
 .profile-header__email  { font-size: 12px; color: var(--color-text-faint); }
 
 .profile-section {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 16px;
   margin-bottom: 14px;
   display: flex;
@@ -2202,9 +2279,6 @@ tbody td {
 
 /* ── REPORTS ─────────────────────────────────────────────── */
 .report-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
   padding: 16px;
   margin-bottom: 16px;
   display: flex;

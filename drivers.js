@@ -5,7 +5,7 @@
 
 import { db, auth } from "./firebase.js";
 import {
-  collection, query, orderBy, getDocs, doc, getDoc,
+  collection, query, orderBy, getDocs, doc, getDoc, setDoc,
   addDoc, updateDoc, deleteDoc, serverTimestamp, where
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import {
@@ -201,15 +201,16 @@ async function openDriverDetail(driverId) {
   const canEdit = S.profile?.role === "master_admin" || S.profile?.role === "fleet_admin";
   const container = document.getElementById("content");
 
-  // Dohvati aktivno zaduženje
-  let activeAssignment = null;
+  // Dohvati aktivna zaduženja — vozač može imati više istovremeno
+  // (npr. dva zadužena vozila), pa uzimamo sva, ne samo prvo.
+  let activeAssignments = [];
   try {
     const snap = await getDocs(query(
       collection(db, "companies", S.companyId, "assignments"),
       where("driverId", "==", driverId),
       where("status", "==", "active")
     ));
-    if (!snap.empty) activeAssignment = { id: snap.docs[0].id, ...snap.docs[0].data() };
+    activeAssignments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
   } catch (e) { /* ignoriši */ }
 
   container.innerHTML = `
@@ -237,15 +238,16 @@ async function openDriverDetail(driverId) {
       <button class="tab-strip__btn tab-strip__btn--active" data-dtab="info">${t("driver_tab_info")}</button>
       <button class="tab-strip__btn" data-dtab="assignments">${t("driver_tab_assignments")}</button>
       <button class="tab-strip__btn" data-dtab="incidents">${t("driver_tab_incidents")}</button>
+      <button class="tab-strip__btn" data-dtab="notes">${t("driver_tab_notes")}</button>
     </div>
 
-    ${activeAssignment ? `
+    ${activeAssignments.map(a => `
       <div class="active-assignment-banner">
-        🔑 Trenutno zadužen: <strong>${activeAssignment.vehicleBrand} ${activeAssignment.vehicleModel}</strong>
-        — ${activeAssignment.vehiclePlate}
-        ${activeAssignment.tripType === "intercity" ? `📍 ${activeAssignment.destination || ""}` : ""}
+        🔑 Trenutno zadužen: <strong>${a.vehicleBrand} ${a.vehicleModel}</strong>
+        — ${a.vehiclePlate}
+        ${a.tripType === "intercity" ? `📍 ${a.destination || ""}` : ""}
       </div>
-    ` : ""}
+    `).join("")}
 
     <div id="driver-tab-content"></div>
   `;
@@ -279,6 +281,7 @@ function renderDriverTab(tab, driver) {
     case "info":        content.innerHTML = renderInfoTab(driver); break;
     case "assignments": loadDriverAssignments(content, driver); break;
     case "incidents":   loadDriverIncidents(content, driver); break;
+    case "notes":       content.innerHTML = renderDriverNotesTab(driver); break;
   }
 }
 
@@ -311,6 +314,13 @@ function renderInfoTab(d) {
       : detailTable(loginRows)
     }
   `;
+}
+
+function renderDriverNotesTab(d) {
+  if (!d.notes) {
+    return `<div class="empty-state">${t("no_data")}</div>`;
+  }
+  return `<div class="vehicle-notes-box">${d.notes}</div>`;
 }
 
 async function loadDriverAssignments(container, driver) {
@@ -592,7 +602,11 @@ async function saveDriver(driverId, existingDriver) {
   if (!firstName) { fieldError("df-firstName", t("driver_first_name_required")); valid = false; }
   if (!lastName)  { fieldError("df-lastName",  t("driver_last_name_required")); valid = false; }
 
-  if (!driverId && username && !password) {
+  // Password je obavezan kad se username unosi prvi put — bilo pri kreiranju
+  // novog vozača, bilo naknadno kroz IZMENI za vozača koji do sad nije imao
+  // lokalni nalog (nema postojeći localAuthUid).
+  const addingLoginFirstTime = !!driverId && username && !existingDriver?.localAuthUid;
+  if ((!driverId || addingLoginFirstTime) && username && !password) {
     fieldError("df-password", t("driver_password_required"));
     valid = false;
   }
@@ -654,11 +668,41 @@ async function saveDriver(driverId, existingDriver) {
         data.localAuthUid = cred.user.uid;
         data.lastSetPassword = password;
         await secondaryAuth.signOut();
+        // Upisujemo u javno-čitljivi indeks da login ekran zna koji je
+        // trenutni auth email za ovaj username (bez ovoga login ne bi
+        // mogao da nađe nalog pre prijave — Firestore users kolekcija
+        // zahteva isAuth()).
+        await setDoc(doc(db, "usernameIndex", username), {
+          authEmail: fakeEmail,
+          updatedAt: serverTimestamp(),
+        });
         console.log("[saveDriver] Auth nalog kreiran OK:", cred.user.uid);
       } catch (authErr) {
         console.error("[saveDriver] Auth greška:", authErr.code, authErr.message);
         throw authErr;
       }
+    }
+
+    // ── EDIT + DODAVANJE LOGINA PRVI PUT ──────────────────────
+    // Vozač je već postojao ali nije imao lokalni nalog (npr. dodat je bez
+    // username-a, pa je admin naknadno kroz IZMENI upisao username+lozinku).
+    // Ovaj slučaj je ranije bio propušten — nijedan od ostala tri bloka
+    // (novi vozač / promena passworda / bez promene passworda) ga nije
+    // pokrivao, pa je vozač ostajao bez Auth naloga i bez usernameIndex
+    // unosa, što je davalo invalid-credential pri login-u.
+    if (isEdit && username && password && !hasExistingLocalAuth) {
+      console.log("[saveDriver] dodajem login postojećem vozaču:", fakeEmail);
+      const secondaryAuth = getSecondaryAuth();
+      const cred = await createUserWithEmailAndPassword(secondaryAuth, fakeEmail, password);
+      await secondaryAuth.signOut();
+
+      data.localAuthUid    = cred.user.uid;
+      data.lastSetPassword = password;
+
+      await setDoc(doc(db, "usernameIndex", username), {
+        authEmail: fakeEmail,
+        updatedAt: serverTimestamp(),
+      });
     }
 
     // ── EDIT + PROMENA PASSWORDA — briši stari, napravi novi ──
@@ -687,6 +731,12 @@ async function saveDriver(driverId, existingDriver) {
       data.localAuthUid    = cred.user.uid;
       data.localAuthEmail  = newEmail;
       data.lastSetPassword = password;
+
+      // Ažuriramo indeks na novi email — od sada login mora da ide na njega.
+      await setDoc(doc(db, "usernameIndex", username), {
+        authEmail: newEmail,
+        updatedAt: serverTimestamp(),
+      });
     }
 
     // ── EDIT + BEZ PROMENE PASSWORDA ─────────────────────────
@@ -717,10 +767,7 @@ async function saveDriver(driverId, existingDriver) {
 
     // ── KREIRAJ / AŽURIRAJ users DOKUMENT za lokalnog korisnika
     if (data.localAuthUid) {
-      const { setDoc: fSetDoc } = await import(
-        "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js"
-      );
-      await fSetDoc(doc(db, "users", data.localAuthUid), {
+      await setDoc(doc(db, "users", data.localAuthUid), {
         role:        "driver",
         status:      "active",
         companyId:   S.companyId,

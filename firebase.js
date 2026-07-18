@@ -67,43 +67,32 @@ export async function loginWithGoogle() {
 
 /**
  * Login sa username + password (lokalni nalog)
- * Traži localAuthEmail u users kolekciji po username polju.
- * Fallback na konstruisani email ako nije pronađen.
+ *
+ * Prvo pokušava preko `usernameIndex/{username}` — javno čitljive kolekcije
+ * (dozvoljeno i bez prijave) koja mapira username na TRENUTNI interni auth
+ * email. Ovo je neophodno jer se email menja svaki put kad admin resetuje
+ * lozinku vozaču (dobija novi email sa timestamp sufiksom, vidi drivers.js) —
+ * jednostavni konstruisani email (username@fleetapp.internal) više ne važi
+ * nakon reseta.
+ *
+ * Ako indeks ne postoji (stariji nalog kreiran pre uvođenja indeksa),
+ * fallback je jednostavni konstruisani email.
  */
 export async function loginWithUsername(username, password) {
-  // Korak 1: pokušaj direktno sa konstruisanim emailom (bez Firestore lookupa)
-  // Firestore nije dostupan nelogovanom korisniku zbog Rules
   const simpleEmail = usernameToEmail(username);
 
   try {
-    return await signInWithEmailAndPassword(auth, simpleEmail, password);
-  } catch (firstErr) {
-    // Korak 2: ako nije uspjelo, možda vozač ima localAuthEmail sa timestampom
-    // (novi format: username.timestamp@fleetapp.internal)
-    // Pokušaj login sa tim emailom — ali Firestore sada može biti dostupan
-    // ako korisnik ima public read na svoj dokument, ili koristimo Auth lookup
-    if (firstErr.code === "auth/user-not-found" ||
-        firstErr.code === "auth/invalid-credential" ||
-        firstErr.code === "auth/wrong-password") {
-      // Pokušaj pronaći email kroz Firestore — ali tek ako imamo pristup
-      // (ovo će raditi ako Rules dozvoljavaju čitanje uz username filter)
-      try {
-        const snap = await getDocs(
-          query(collection(db, "users"), where("username", "==", username))
-        );
-        if (!snap.empty) {
-          const userData = snap.docs[0].data();
-          if (userData.localAuthEmail && userData.localAuthEmail !== simpleEmail) {
-            return await signInWithEmailAndPassword(auth, userData.localAuthEmail, password);
-          }
-        }
-      } catch (lookupErr) {
-        // Firestore lookup nije uspio — baci originalnu grešku
-        console.warn("Firestore username lookup failed:", lookupErr.code);
-      }
+    const indexSnap = await getDoc(doc(db, "usernameIndex", username));
+    if (indexSnap.exists() && indexSnap.data().authEmail) {
+      return await signInWithEmailAndPassword(auth, indexSnap.data().authEmail, password);
     }
-    throw firstErr;
+  } catch (lookupErr) {
+    // Indeks nije dostupan iz nekog razloga — nastavljamo na fallback ispod,
+    // ne prekidamo login zbog ovoga.
+    console.warn("usernameIndex lookup failed:", lookupErr.code);
   }
+
+  return signInWithEmailAndPassword(auth, simpleEmail, password);
 }
 
 /** Logout */

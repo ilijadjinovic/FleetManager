@@ -104,25 +104,6 @@ service cloud.firestore {
                         'kmConfirmed', 'kmConfirmedValue', 'kmConfirmedAt']);
       }
 
-      // ── VOŽNJE (pojedinačne vožnje unutar jednog zaduženja) ──
-      match /trips/{tripId} {
-        allow read: if isCompanyMember(companyId);
-        // Admin kreira prvu vožnju automatski uz zaduženje; vozač kreira
-        // sledeću vožnju kad zatvori prethodnu (uvek za samog sebe).
-        allow create: if isMasterAdmin() || isFleetAdmin(companyId)
-          || (isDriver(companyId) && request.resource.data.driverUid == request.auth.uid);
-        // Admin može sve; vozač može da zatvori SAMO svoju vožnju i samo
-        // dozvoljena polja (isti obrazac kao kod zaduženja).
-        allow update: if isMasterAdmin() || isFleetAdmin(companyId)
-          || (isDriver(companyId)
-              && (resource.data.driverUid == request.auth.uid
-                  || (getUserData().get('driverId', null) != null
-                      && resource.data.get('driverId', null) == getUserData().get('driverId', null)))
-              && request.resource.data.diff(resource.data).affectedKeys()
-                  .hasOnly(['status', 'endDate', 'endKm', 'notes', 'updatedAt']));
-        allow delete: if isMasterAdmin() || isFleetAdmin(companyId);
-      }
-
       // ── TRIP ENTRIES (gorivo, putarine, prijave) ──────────
       match /tripEntries/{entryId} {
         allow read: if isCompanyMember(companyId);
