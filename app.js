@@ -178,7 +178,26 @@ const TAB_RENDERERS = {
   servicers:   renderServicers,
 };
 
+// ── Hamburger / izvlačenje menija na telefonima ──────────────
+function setNavOpen(open) {
+  document.body.classList.toggle("nav-open", open);
+  document.getElementById("nav-toggle")?.setAttribute("aria-expanded", String(open));
+}
+let navToggleBound = false;
+function bindNavToggle() {
+  if (navToggleBound) return;
+  navToggleBound = true;
+  document.getElementById("nav-toggle")?.addEventListener("click", () => {
+    setNavOpen(!document.body.classList.contains("nav-open"));
+  });
+  document.getElementById("nav-overlay")?.addEventListener("click", () => setNavOpen(false));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") setNavOpen(false); });
+  // Ako se ekran proširi (rotacija/desktop), zatvori izvučeni meni
+  window.matchMedia("(min-width: 769px)").addEventListener("change", (e) => { if (e.matches) setNavOpen(false); });
+}
+
 export function buildNav() {
+  bindNavToggle();
   const role = S.profile?.role || "driver";
   const tabs = TAB_CONFIG[role] || TAB_CONFIG.driver;
   const nav = document.getElementById("main-nav");
@@ -192,7 +211,7 @@ export function buildNav() {
   `).join("");
 
   nav.querySelectorAll(".nav-btn").forEach(btn => {
-    btn.addEventListener("click", () => navigateTo(btn.dataset.tab));
+    btn.addEventListener("click", () => { setNavOpen(false); navigateTo(btn.dataset.tab); });
   });
 }
 

@@ -9,7 +9,7 @@ import {
   collection, query, where, orderBy, getDocs,
   doc, getDoc
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
-import { t, getCurrentLang } from "./i18n.js";
+import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
 import { S, showToast } from "./app.js";
 import { isVehicleRegistered } from "./vehicles.js";
 import { DEJAVU_SANS_REGULAR_B64, DEJAVU_SANS_BOLD_B64 } from "./fonts-dejavu.js";
@@ -1101,9 +1101,7 @@ function setStatus(msg) {
 }
 
 function formatDateSr(val) {
-  if (!val) return "—";
-  const d = val.toDate ? val.toDate() : new Date(val);
-  return isNaN(d) ? "—" : d.toLocaleDateString("sr-RS");
+  return formatDateDMY(val);
 }
 
 function formatDateFile(date) {
@@ -1122,7 +1120,7 @@ function today() {
 // Placeholder prati jezik aplikacije (dd/mm ostaje fiksno — poslovno
 // pravilo firme — menja se samo naziv za "godinu": yyyy (en) / gggg (sr)).
 function datePlaceholder() {
-  return getCurrentLang() === "en" ? "dd/mm/yyyy" : "dd/mm/gggg";
+  return getCurrentLang() === "en" ? "dd.mm.yyyy" : "dd.mm.gggg";
 }
 
 // ── DATUMI: prikaz i unos u lokalnom formatu dd/mm/yyyy ──────
@@ -1135,12 +1133,12 @@ function toDMY(val) {
   if (isNaN(d)) return "";
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${dd}/${mm}/${d.getFullYear()}`;
+  return `${dd}.${mm}.${d.getFullYear()}`;
 }
 
 function parseDMY(str) {
   if (!str) return null;
-  const m = String(str).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  const m = String(str).trim().match(/^(\d{1,2})[./](\d{1,2})[./](\d{4})\.?$/);
   if (!m) return null;
   const day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
   const d = new Date(year, month - 1, day);
@@ -1154,8 +1152,8 @@ function attachDateMask(id) {
   el.addEventListener("input", () => {
     const digits = el.value.replace(/\D/g, "").slice(0, 8);
     let out = digits;
-    if (digits.length > 4) out = `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
-    else if (digits.length > 2) out = `${digits.slice(0, 2)}/${digits.slice(2)}`;
+    if (digits.length > 4) out = `${digits.slice(0, 2)}.${digits.slice(2, 4)}.${digits.slice(4)}`;
+    else if (digits.length > 2) out = `${digits.slice(0, 2)}.${digits.slice(2)}`;
     el.value = out;
   });
 }

@@ -22,6 +22,9 @@
     <!-- HEADER -->
     <header class="app-header">
       <div class="app-header__left">
+        <button id="nav-toggle" class="nav-toggle" type="button" aria-label="Meni" aria-expanded="false" aria-controls="main-nav">
+          <span></span><span></span><span></span>
+        </button>
         <img class="app-header__logo-img" src="./assets/icon-192.png" alt="Fleet Manager" />
         <span class="app-header__name">Fleet Manager</span>
       </div>
@@ -32,7 +35,10 @@
       <!-- Renderuje aktivni tab -->
     </main>
 
-    <!-- NAVIGACIJA (bottom tabs) -->
+    <!-- Zatamnjenje iza menija na telefonima -->
+    <div id="nav-overlay" class="nav-overlay"></div>
+
+    <!-- NAVIGACIJA (levi vertikalni meni; na telefonu se otvara hamburgerom) -->
     <nav id="main-nav" class="main-nav">
       <!-- Renderuje app.js buildNav() -->
     </nav>

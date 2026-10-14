@@ -8,7 +8,7 @@ import {
   collection, getDocs, addDoc, updateDoc, deleteDoc, doc,
   query, where, orderBy, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
-import { t, getCurrentLang } from "./i18n.js";
+import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
 import { S, showToast, openModal } from "./app.js";
 import { getServiceProviders } from "./servicers.js";
 
@@ -233,9 +233,7 @@ export function openScheduledServiceDetail(s) {
   if (!container) return;
 
   const d = s.scheduledDate?.toDate ? s.scheduledDate.toDate() : new Date(s.scheduledDate);
-  const dateStr = d.toLocaleDateString(getCurrentLang() === "en" ? "en-GB" : "sr-RS", {
-    day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit"
-  });
+  const dateStr = formatDateTimeDMY(d);
 
   container.innerHTML = `
     <div class="detail-header">
@@ -316,10 +314,7 @@ async function sendPushToDrivers(vehicle, serviceType, date, providerName) {
 
   if (permission !== "granted") return;
 
-  const dateStr = date.toLocaleDateString(getCurrentLang() === "en" ? "en-GB" : "sr-RS", {
-    day: "2-digit", month: "2-digit", year: "numeric",
-    hour: "2-digit", minute: "2-digit"
-  });
+  const dateStr = formatDateTimeDMY(date);
 
   const title = `🔧 ${t("schedule_title_prefix")} — ${vehicle.brand} ${vehicle.model}`;
   const body  = [

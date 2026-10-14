@@ -10,7 +10,7 @@ import { db } from "./firebase.js";
 import {
   collection, query, orderBy, getDocs, where
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
-import { t, getCurrentLang } from "./i18n.js";
+import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
 import { S } from "./app.js";
 import { fuelLevelLabel, fuelLevelColorClass } from "./vehicles.js";
 
@@ -552,9 +552,6 @@ function renderAdminList(entries, filter, search) {
 
 // ── UTILS ─────────────────────────────────────────────────────
 function formatDate(val) {
-  if (!val) return "—";
-  const d = val.toDate ? val.toDate() : new Date(val);
-  const locale = getCurrentLang() === "en" ? "en-GB" : "sr-RS";
-  return isNaN(d) ? "—" : d.toLocaleDateString(locale);
+  return formatDateDMY(val);
 }
 

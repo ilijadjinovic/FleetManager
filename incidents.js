@@ -10,7 +10,7 @@ import {
   collection, query, orderBy, getDocs, doc, getDoc,
   addDoc, updateDoc, serverTimestamp, where
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
-import { t, getCurrentLang } from "./i18n.js";
+import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
 import { S, showToast, openModal } from "./app.js";
 import { openServiceForm, incidentToServicePrefill } from "./vehicles.js";
 
@@ -571,6 +571,7 @@ async function saveIncident() {
     if (vehicleId) {
       await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId), {
         currentKm: currentKm,
+        currentKmUpdatedAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
     }
@@ -712,8 +713,5 @@ function typeIcon(type) {
 }
 
 function formatDate(val) {
-  if (!val) return "—";
-  const d = val.toDate ? val.toDate() : new Date(val);
-  const locale = getCurrentLang() === "en" ? "en-GB" : "sr-RS";
-  return isNaN(d) ? "—" : d.toLocaleDateString(locale);
+  return formatDateDMY(val);
 }

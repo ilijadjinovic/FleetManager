@@ -14,7 +14,7 @@ import {
   updatePassword,
   getAuth
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
-import { t, getCurrentLang } from "./i18n.js";
+import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
 import { S, showToast, openModal } from "./app.js";
 import { usernameToEmail, getSecondaryAuth } from "./firebase.js";
 import { historyAssignmentCard, attachAssignmentHistoryEvents, loadDriverAssignmentHistory } from "./trips.js";
@@ -122,15 +122,17 @@ function renderList() {
   const canEdit = S.profile?.role === "master_admin" || S.profile?.role === "fleet_admin";
 
   list.innerHTML = `
-    <div class="drivers-grid">
-      ${filtered.map(d => driverCard(d, canEdit)).join("")}
+    <div class="driver-table-wrap">
+      <div class="driver-table">
+        ${filtered.map(d => driverRow(d, canEdit)).join("")}
+      </div>
     </div>
   `;
 
-  list.querySelectorAll(".driver-card").forEach(card => {
-    card.addEventListener("click", (e) => {
+  list.querySelectorAll(".driver-row").forEach(row => {
+    row.addEventListener("click", (e) => {
       if (e.target.closest(".btn")) return; // ne otvara detail ako se klikne dugme
-      openDriverDetail(card.dataset.id);
+      openDriverDetail(row.dataset.id);
     });
   });
 
@@ -152,43 +154,56 @@ function renderList() {
   }
 }
 
-// ── DRIVER CARD ───────────────────────────────────────────────
-function driverCard(d, canEdit) {
+// ── DRIVER ROW (tabelarni prikaz liste) ─────────────────────────
+function driverRow(d, canEdit) {
   const isActive = d.active !== false;
   const hasLogin = d.username || d.googleEmail;
-  const initials = `${(d.firstName || "?")[0]}${(d.lastName || "?")[0]}`.toUpperCase();
 
   return `
-    <div class="driver-card ${!isActive ? "driver-card--inactive" : ""}" data-id="${d.id}">
-      <div class="driver-card__avatar">${initials}</div>
-      <div class="driver-card__body">
-        <div class="driver-card__header">
-          <div class="driver-card__name">${d.firstName} ${d.lastName}</div>
+    <div class="driver-row ${!isActive ? "driver-row--inactive" : ""}" data-id="${d.id}">
+      <div class="driver-row__top">
+        <div class="driver-row__info">
+          <div class="driver-row__name">${d.firstName} ${d.lastName}</div>
+          ${d.position ? `<div class="driver-row__position">💼 ${d.position}</div>` : ""}
+        </div>
+        <div class="driver-row__badges">
           <span class="badge badge--${isActive ? "active" : "inactive"}">
             ${isActive ? t("driver_active") : t("driver_inactive")}
           </span>
-        </div>
-        ${d.position ? `<div class="driver-card__position">💼 ${d.position}</div>` : ""}
-        <div class="driver-card__details">
-          ${d.licenseCategories ? `<span class="driver-detail">🪪 ${d.licenseCategories}</span>` : ""}
-          ${d.phone ? `<span class="driver-detail">📞 ${d.phone}</span>` : ""}
-          ${d.birthYear ? `<span class="driver-detail">📅 ${d.birthYear}</span>` : ""}
-        </div>
-        <div class="driver-card__login">
           ${d.googleEmail ? `<span class="login-chip login-chip--google">G</span>` : ""}
           ${d.username ? `<span class="login-chip login-chip--local">UN</span>` : ""}
           ${!hasLogin ? `<span class="login-chip login-chip--none">${t("driver_no_access")}</span>` : ""}
+          ${canEdit ? `
+            <div class="driver-row__actions">
+              <button class="btn btn--ghost btn--sm btn-edit-driver" data-id="${d.id}" title="${t("edit")}">✏️</button>
+              <button class="btn btn--ghost btn--sm btn-toggle-driver" data-id="${d.id}"
+                title="${isActive ? t("driver_inactive") : t("driver_active")}">
+                ${isActive ? "⏸️" : "▶️"}
+              </button>
+            </div>
+          ` : ""}
         </div>
       </div>
-      ${canEdit ? `
-        <div class="driver-card__actions">
-          <button class="btn btn--ghost btn--sm btn-edit-driver" data-id="${d.id}" title="${t("edit")}">✏️</button>
-          <button class="btn btn--ghost btn--sm btn-toggle-driver" data-id="${d.id}"
-            title="${isActive ? t("driver_inactive") : t("driver_active")}">
-            ${isActive ? "⏸️" : "▶️"}
-          </button>
-        </div>
-      ` : ""}
+      <div class="driver-row__fields">
+        ${d.licenseCategories ? `
+          <div class="driver-row__field">
+            <span class="driver-row__field-label">🪪 ${t("driver_license_cat")}</span>
+            <span class="driver-row__field-value">${d.licenseCategories}</span>
+          </div>
+        ` : ""}
+        ${d.phone ? `
+          <div class="driver-row__field">
+            <span class="driver-row__field-label">📞 ${t("driver_phone")}</span>
+            <span class="driver-row__field-value">${d.phone}</span>
+          </div>
+        ` : ""}
+        ${d.birthYear ? `
+          <div class="driver-row__field">
+            <span class="driver-row__field-label">📅 ${t("driver_birth_year")}</span>
+            <span class="driver-row__field-value">${d.birthYear}</span>
+          </div>
+        ` : ""}
+      </div>
     </div>
   `;
 }
@@ -638,11 +653,23 @@ async function saveDriver(driverId, existingDriver) {
     notes:             document.getElementById("df-notes")?.value.trim() || null,
   };
 
+  // Lista "poništavanja" — ako bilo koji korak pukne, izvršavaju se u obrnutom
+  // redosledu da ne ostanu siročići (Auth nalog bez vozača, indeks bez naloga...)
+  const undo = [];
+  let secondaryAuth = null;
+  const runRollback = async () => {
+    for (const fn of undo.reverse()) {
+      try { await fn(); } catch (rbErr) { console.warn("[saveDriver] rollback korak nije uspeo:", rbErr?.code, rbErr?.message); }
+    }
+    try { await secondaryAuth?.signOut(); } catch (_) { /* ignoriši */ }
+  };
+
   try {
     const fakeEmail = username ? usernameToEmail(username) : null;
     const isEdit    = !!driverId;
     const hasExistingLocalAuth = !!(existingDriver?.localAuthUid);
     const passwordChanged = isEdit && username && password;
+    let oldUsersDocToDelete = null;
 
     // ── VALIDACIJA JEDINSTVENOSTI JMBG (pre kreiranja Auth naloga!) ──
     if (data.jmbg && data.jmbg !== existingDriver?.jmbg) {
@@ -657,93 +684,69 @@ async function saveDriver(driverId, existingDriver) {
       }
     }
 
-    // ── NOVI VOZAČ — kreiraj Firebase Auth nalog ──────────────
-    console.log("[saveDriver] pre Auth bloka", { isEdit, username, hasPassword: !!password, fakeEmail, companyId: S.companyId, userUid: S.user?.uid });
-    // Koristimo sekundarnu instancu da ne odjavimo admina!
-    if (!isEdit && username && password) {
-      console.log("[saveDriver] kreiram Auth nalog za:", fakeEmail);
-      try {
-        const secondaryAuth = getSecondaryAuth();
-        const cred = await createUserWithEmailAndPassword(secondaryAuth, fakeEmail, password);
-        data.localAuthUid = cred.user.uid;
-        data.lastSetPassword = password;
-        await secondaryAuth.signOut();
-        // Upisujemo u javno-čitljivi indeks da login ekran zna koji je
-        // trenutni auth email za ovaj username (bez ovoga login ne bi
-        // mogao da nađe nalog pre prijave — Firestore users kolekcija
-        // zahteva isAuth()).
-        await setDoc(doc(db, "usernameIndex", username), {
-          authEmail: fakeEmail,
-          updatedAt: serverTimestamp(),
-        });
-        console.log("[saveDriver] Auth nalog kreiran OK:", cred.user.uid);
-      } catch (authErr) {
-        console.error("[saveDriver] Auth greška:", authErr.code, authErr.message);
-        throw authErr;
-      }
-    }
-
-    // ── EDIT + DODAVANJE LOGINA PRVI PUT ──────────────────────
-    // Vozač je već postojao ali nije imao lokalni nalog (npr. dodat je bez
-    // username-a, pa je admin naknadno kroz IZMENI upisao username+lozinku).
-    // Ovaj slučaj je ranije bio propušten — nijedan od ostala tri bloka
-    // (novi vozač / promena passworda / bez promene passworda) ga nije
-    // pokrivao, pa je vozač ostajao bez Auth naloga i bez usernameIndex
-    // unosa, što je davalo invalid-credential pri login-u.
-    if (isEdit && username && password && !hasExistingLocalAuth) {
-      console.log("[saveDriver] dodajem login postojećem vozaču:", fakeEmail);
-      const secondaryAuth = getSecondaryAuth();
-      const cred = await createUserWithEmailAndPassword(secondaryAuth, fakeEmail, password);
-      await secondaryAuth.signOut();
-
+    // Kreira Auth nalog preko sekundarne instance (da admin ostane prijavljen).
+    // Nalog ostaje prijavljen na sekundarnoj instanci do kraja snimanja, da bi
+    // mogao da se obriše ako nešto kasnije pukne.
+    const createAuthAccount = async (email) => {
+      secondaryAuth = getSecondaryAuth();
+      const cred = await createUserWithEmailAndPassword(secondaryAuth, email, password);
+      undo.push(() => cred.user.delete());
       data.localAuthUid    = cred.user.uid;
       data.lastSetPassword = password;
+      return cred;
+    };
 
+    console.log("[saveDriver] pre Auth bloka", { isEdit, username, hasPassword: !!password, fakeEmail, companyId: S.companyId, userUid: S.user?.uid });
+
+    // ── NOVI VOZAČ — kreiraj Firebase Auth nalog ──────────────
+    if (!isEdit && username && password) {
+      console.log("[saveDriver] kreiram Auth nalog za:", fakeEmail);
+      await createAuthAccount(fakeEmail);
+      // Javno-čitljivi indeks: login ekran preko njega nalazi auth email za username
       await setDoc(doc(db, "usernameIndex", username), {
         authEmail: fakeEmail,
         updatedAt: serverTimestamp(),
       });
+      undo.push(() => deleteDoc(doc(db, "usernameIndex", username)));
+      console.log("[saveDriver] Auth nalog kreiran OK:", data.localAuthUid);
     }
 
-    // ── EDIT + PROMENA PASSWORDA — briši stari, napravi novi ──
+    // ── EDIT + DODAVANJE LOGINA PRVI PUT ──────────────────────
+    if (isEdit && username && password && !hasExistingLocalAuth) {
+      console.log("[saveDriver] dodajem login postojećem vozaču:", fakeEmail);
+      await createAuthAccount(fakeEmail);
+      await setDoc(doc(db, "usernameIndex", username), {
+        authEmail: fakeEmail,
+        updatedAt: serverTimestamp(),
+      });
+      undo.push(() => deleteDoc(doc(db, "usernameIndex", username)));
+    }
+
+    // ── EDIT + PROMENA PASSWORDA — novi nalog, stari users dokument se briše na kraju ──
+    // (Firebase Auth se ne može menjati tuđi nalog iz frontenda, pa se pravi novi
+    // nalog sa timestamp sufiksom u emailu; stari ostaje u Auth-u kao siroče.)
     if (isEdit && username && password && hasExistingLocalAuth) {
-      // Korak 1: obriši stari users dokument
-      try {
-        await deleteDoc(doc(db, "users", existingDriver.localAuthUid));
-      } catch (e) { /* možda već ne postoji */ }
+      const newEmail = `${username}.${Date.now()}@fleetapp.internal`;
+      await createAuthAccount(newEmail);
+      data.localAuthEmail = newEmail;
 
-      // Korak 2: kreiraj novi Firebase Auth nalog sa istim username, novim passwordom
-      // Najpre pokušaj da obrišemo stari nalog kroz REST API
-      // (nije moguće sa frontendom — zato radimo workaround)
-      // Workaround: koristimo privremeni novi nalog sa timestamp sufiksom u emailu,
-      // pa ga odmah zamenimo pravim
-      //
-      // Realistično rešenje: kreiramo novi nalog. Stari ostaje u Firebase Auth ali
-      // je siroče (nema users dokument, nema pristupa app-i).
-      // Novi nalog dobija isti username lookup.
-
-      const ts = Date.now();
-      const newEmail = `${username}.${ts}@fleetapp.internal`;
-      const secondaryAuth = getSecondaryAuth();
-      const cred = await createUserWithEmailAndPassword(secondaryAuth, newEmail, password);
-      await secondaryAuth.signOut();
-
-      data.localAuthUid    = cred.user.uid;
-      data.localAuthEmail  = newEmail;
-      data.lastSetPassword = password;
-
-      // Ažuriramo indeks na novi email — od sada login mora da ide na njega.
+      const previousEmail = existingDriver.localAuthEmail || fakeEmail;
       await setDoc(doc(db, "usernameIndex", username), {
         authEmail: newEmail,
         updatedAt: serverTimestamp(),
       });
+      // Ako snimanje pukne, indeks se vraća na stari email
+      undo.push(() => setDoc(doc(db, "usernameIndex", username), {
+        authEmail: previousEmail,
+        updatedAt: serverTimestamp(),
+      }));
+      oldUsersDocToDelete = existingDriver.localAuthUid;
     }
 
     // ── EDIT + BEZ PROMENE PASSWORDA ─────────────────────────
     if (isEdit && username && !password && hasExistingLocalAuth) {
-      // Čuva se stari localAuthUid, password se ne menja
-      data.localAuthUid   = existingDriver.localAuthUid;
-      data.localAuthEmail = existingDriver.localAuthEmail;
+      data.localAuthUid    = existingDriver.localAuthUid;
+      data.localAuthEmail  = existingDriver.localAuthEmail;
       data.lastSetPassword = existingDriver.lastSetPassword;
     }
 
@@ -762,6 +765,7 @@ async function saveDriver(driverId, existingDriver) {
         { ...data, createdAt: serverTimestamp(), createdBy: S.user.uid }
       );
       driverDocId = ref.id;
+      undo.push(() => deleteDoc(doc(db, "companies", S.companyId, "drivers", ref.id)));
       console.log("[saveDriver] vozač snimljen, id:", driverDocId);
     }
 
@@ -782,6 +786,12 @@ async function saveDriver(driverId, existingDriver) {
       });
     }
 
+    // ── Sve je uspelo: tek sada se briše stari users dokument (promena passworda)
+    if (oldUsersDocToDelete) {
+      try { await deleteDoc(doc(db, "users", oldUsersDocToDelete)); } catch (e) { /* možda već ne postoji */ }
+    }
+    try { await secondaryAuth?.signOut(); } catch (_) { /* ignoriši */ }
+
     // ── REFRESH LISTE — uvek, odmah nakon snimanja ───────────
     await loadDrivers();
     const container = document.getElementById("content");
@@ -795,10 +805,13 @@ async function saveDriver(driverId, existingDriver) {
     }
 
   } catch (e) {
-    if (e.message === "validation") throw e; // poruka je već prikazana kao field error
+    if (e.message === "validation") { await runRollback(); throw e; } // poruka je već prikazana kao field error
     console.error("[saveDriver] GREŠKA:", e.code, e.message, e);
+    await runRollback();
     if (e.code === "auth/email-already-in-use") {
       fieldError("df-username", t("driver_username_taken"));
+    } else if (e.code === "permission-denied") {
+      showFormError(`${t("error")}: ${e.message} (proveri Firestore pravila i ulogu naloga)`);
     } else {
       showFormError(`${t("error")}: ${e.message}`);
     }
@@ -913,10 +926,7 @@ function assignmentItem(a) {
 
 // ── UTILS ─────────────────────────────────────────────────────
 function formatDate(val) {
-  if (!val) return "—";
-  const d = val.toDate ? val.toDate() : new Date(val);
-  const locale = getCurrentLang() === "en" ? "en-GB" : "sr-RS";
-  return isNaN(d) ? "—" : d.toLocaleDateString(locale);
+  return formatDateDMY(val);
 }
 
 function toJsDate(val) {

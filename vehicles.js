@@ -9,10 +9,14 @@ import {
   addDoc, updateDoc, deleteDoc, serverTimestamp,
   where
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
-import { t, getCurrentLang } from "./i18n.js";
+import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
 import { S, showToast, openModal, closeModal } from "./app.js";
 import { getServiceProviders } from "./servicers.js";
-import { effectiveServiceStatus, isServiceToday, isServiceOverdue, overdueDays, SERVICE_STATUS } from "./service-status.js";
+import {
+  effectiveServiceStatus, isServiceToday, isServiceOverdue, overdueDays, SERVICE_STATUS,
+  getServiceSettings, getRegularServiceInfo, nextServiceSummary, shiftToWorkday, isWeekend,
+  cleanVehicleServiceOverrides
+} from "./service-status.js";
 import { incidentCard, scheduleServiceForIncident } from "./incidents.js";
 
 // ── PREDEFINISANE BOJE VOZILA ────────────────────────────────
@@ -178,6 +182,7 @@ function fuelBadge(v) {
 let allVehicles = [];
 let currentFilter = "all";
 let searchTerm = "";
+let currentSort = "none";
 let currentVehicleId = null; // za detail pogled
 
 // ── GLAVNI RENDER ─────────────────────────────────────────────
@@ -194,7 +199,20 @@ export async function renderVehicles(container, initialFilter = null) {
   container.innerHTML = `
     <div class="page-header">
       <h2 class="page-title">${t("tab_vehicles")}</h2>
-      ${canEdit ? `<button id="btn-add-vehicle" class="btn btn--primary btn--sm">+ ${t("vehicle_add")}</button>` : ""}
+      <div class="page-header__actions">
+        <div class="sort-control">
+          <select id="vehicle-sort-select" class="form-input form-input--sm">
+            <option value="none">${t("vehicle_sort_none")}</option>
+            <option value="brand_asc">${t("vehicle_sort_brand")}</option>
+            <option value="year_desc">${t("vehicle_sort_year_desc")}</option>
+            <option value="year_asc">${t("vehicle_sort_year_asc")}</option>
+            <option value="km_desc">${t("vehicle_sort_km")}</option>
+            <option value="plate_asc">${t("vehicle_sort_plate")}</option>
+          </select>
+          <button id="btn-sort" class="btn btn--secondary btn--sm">${t("vehicle_sort_apply")}</button>
+        </div>
+        ${canEdit ? `<button id="btn-add-vehicle" class="btn btn--primary btn--sm">+ ${t("vehicle_add")}</button>` : ""}
+      </div>
     </div>
 
     <div class="filter-bar">
@@ -235,7 +253,40 @@ export async function renderVehicles(container, initialFilter = null) {
     renderList();
   });
 
+  const sortSelectEl = document.getElementById("vehicle-sort-select");
+  if (sortSelectEl) sortSelectEl.value = currentSort;
+  document.getElementById("btn-sort")?.addEventListener("click", () => {
+    currentSort = document.getElementById("vehicle-sort-select")?.value || "none";
+    renderList();
+  });
+
   await loadVehicles();
+}
+
+// ── SORTIRANJE ──────────────────────────────────────────────────
+function sortVehicles(arr) {
+  const sorted = arr.slice();
+  const lang = getCurrentLang() === "en" ? "en" : "sr";
+  switch (currentSort) {
+    case "brand_asc":
+      sorted.sort((a, b) => `${a.brand || ""} ${a.model || ""}`.localeCompare(`${b.brand || ""} ${b.model || ""}`, lang));
+      break;
+    case "year_desc":
+      sorted.sort((a, b) => (Number(b.year) || 0) - (Number(a.year) || 0));
+      break;
+    case "year_asc":
+      sorted.sort((a, b) => (Number(a.year) || 0) - (Number(b.year) || 0));
+      break;
+    case "km_desc":
+      sorted.sort((a, b) => (Number(b.currentKm) || 0) - (Number(a.currentKm) || 0));
+      break;
+    case "plate_asc":
+      sorted.sort((a, b) => (a.plate || "").localeCompare(b.plate || "", lang));
+      break;
+    default:
+      break; // "none" — zadržava se redosled iz baze (createdAt desc)
+  }
+  return sorted;
 }
 
 // ── UČITAJ VOZILA ─────────────────────────────────────────────
@@ -283,70 +334,98 @@ function renderList() {
     return;
   }
 
+  filtered = sortVehicles(filtered);
+
+  // ── GRUPISANJE PO VLASNIKU ────────────────────────────────────
+  // Vozila se prikazuju grupisana po vlasniku (v.ownerName) — svaki
+  // vlasnik dobija svoju vizuelno odvojenu sekciju sa svojim vozilima.
+  // Vozila bez unetog vlasnika idu u zajedničku grupu na kraju.
+  const groupsMap = new Map();
+  filtered.forEach(v => {
+    const key = (v.ownerName || "").trim();
+    if (!groupsMap.has(key)) groupsMap.set(key, []);
+    groupsMap.get(key).push(v);
+  });
+
+  const ownerKeys = Array.from(groupsMap.keys())
+    .filter(k => k !== "")
+    .sort((a, b) => a.localeCompare(b, getCurrentLang() === "en" ? "en" : "sr"));
+  if (groupsMap.has("")) ownerKeys.push(""); // "bez vlasnika" uvek poslednje
+
   list.innerHTML = `
-    <div class="vehicle-grid">
-      ${filtered.map(v => vehicleCard(v)).join("")}
+    <div class="vehicle-table-wrap">
+      ${ownerKeys.map(key => `
+        <div class="vehicle-owner-group">
+          <div class="vehicle-owner-group__header">
+            <span class="vehicle-owner-group__icon">👤</span>
+            <span class="vehicle-owner-group__name">${key || t("vehicle_no_owner")}</span>
+            <span class="vehicle-owner-group__count">${groupsMap.get(key).length}</span>
+          </div>
+          <div class="vehicle-table">
+            ${groupsMap.get(key).map(v => vehicleRow(v)).join("")}
+          </div>
+        </div>
+      `).join("")}
     </div>
   `;
 
-  list.querySelectorAll(".vehicle-card").forEach(card => {
-    card.addEventListener("click", () => openVehicleDetail(card.dataset.id));
+  list.querySelectorAll(".vehicle-row").forEach(row => {
+    row.addEventListener("click", () => openVehicleDetail(row.dataset.id));
   });
 }
 
-// ── VEHICLE CARD (lista) ──────────────────────────────────────
-function vehicleCard(v) {
+// ── VEHICLE ROW (tabelarni prikaz liste) ────────────────────────
+function vehicleRow(v) {
   const today = new Date();
   const regDate = v.regExpiry ? (v.regExpiry.toDate ? v.regExpiry.toDate() : new Date(v.regExpiry)) : null;
   const daysToReg = regDate ? Math.ceil((regDate - today) / 86400000) : null;
   const regWarning = daysToReg !== null && daysToReg <= 30;
 
   return `
-    <div class="vehicle-card ${v.archived ? "vehicle-card--archived" : ""}" data-id="${v.id}">
-      <div class="vehicle-card__header">
-        <div class="vehicle-card__info">
-          <div class="vehicle-card__name">${v.brand} ${v.model}</div>
-          <div class="vehicle-card__plate">${v.plate}</div>
+    <div class="vehicle-row ${v.archived ? "vehicle-row--archived" : ""}" data-id="${v.id}">
+      <div class="vehicle-row__top">
+        <div class="vehicle-row__info">
+          <div class="vehicle-row__name">${v.brand} ${v.model}</div>
+          <div class="vehicle-row__plate">${v.plate}</div>
         </div>
-        ${v.archived
-          ? `<span class="badge badge--cancelled">${t("vehicle_status_archived")}</span>`
-          : `<span class="badge badge--${v.status || 'active'}">${t("vehicle_status_" + (v.status || "active"))}</span>`
-        }
+        <div class="vehicle-row__badges">
+          ${v.archived
+            ? `<span class="badge badge--cancelled">${t("vehicle_status_archived")}</span>`
+            : `<span class="badge badge--${v.status || 'active'}">${t("vehicle_status_" + (v.status || "active"))}</span>`
+          }
+          ${regBadge(v)}
+          ${fuelBadge(v)}
+        </div>
       </div>
-      <div class="vehicle-card__details">
-        <div class="vehicle-card__detail">
-          <span class="vehicle-card__detail-label">VIN</span>
-          <span class="vehicle-card__detail-value mono">${v.vin || "—"}</span>
+      <div class="vehicle-row__fields">
+        <div class="vehicle-row__field">
+          <span class="vehicle-row__field-label">VIN</span>
+          <span class="vehicle-row__field-value mono">${v.vin || "—"}</span>
         </div>
-        <div class="vehicle-card__detail">
-          <span class="vehicle-card__detail-label">${t("vehicle_current_km")}</span>
-          <span class="vehicle-card__detail-value">${v.currentKm ? v.currentKm.toLocaleString() + " km" : "—"}</span>
+        <div class="vehicle-row__field">
+          <span class="vehicle-row__field-label">${t("vehicle_current_km")}</span>
+          <span class="vehicle-row__field-value">${v.currentKm ? v.currentKm.toLocaleString() + " km" : "—"}</span>
         </div>
-        <div class="vehicle-card__detail ${regWarning ? "vehicle-card__detail--warn" : ""}">
-          <span class="vehicle-card__detail-label">${t("vehicle_reg_expiry")}</span>
-          <span class="vehicle-card__detail-value">
-            ${regDate ? regDate.toLocaleDateString(getCurrentLang() === "en" ? "en-GB" : "sr-RS") : "—"}
+        <div class="vehicle-row__field ${regWarning ? "vehicle-row__field--warn" : ""}">
+          <span class="vehicle-row__field-label">${t("vehicle_reg_expiry")}</span>
+          <span class="vehicle-row__field-value">
+            ${regDate ? formatDateDMY(regDate) : "—"}
             ${regWarning ? ` <span class="reg-warn">(${daysToReg}d)</span>` : ""}
           </span>
         </div>
-        <div class="vehicle-card__detail">
-          <span class="vehicle-card__detail-label">${t("vehicle_year")}</span>
-          <span class="vehicle-card__detail-value">${v.year || "—"}</span>
+        <div class="vehicle-row__field">
+          <span class="vehicle-row__field-label">${t("vehicle_year")}</span>
+          <span class="vehicle-row__field-value">${v.year || "—"}</span>
         </div>
+        ${v.assignedDriverName ? `
+          <div class="vehicle-row__field">
+            <span class="vehicle-row__field-label">👤</span>
+            <span class="vehicle-row__field-value">${v.assignedDriverName}</span>
+          </div>
+        ` : ""}
       </div>
-      ${(regBadge(v) || fuelBadge(v)) ? `
-        <div class="vehicle-card__details" style="margin-top:6px">
-          <div>${regBadge(v)}</div>
-          <div style="text-align:right">${fuelBadge(v)}</div>
-        </div>
-      ` : ""}
-      ${v.assignedDriverName ? `
-        <div class="vehicle-card__driver">
-          <span>👤</span> ${v.assignedDriverName}
-        </div>
-      ` : ""}
       ${v.notes ? `
-        <div class="vehicle-card__notes">
+        <div class="vehicle-row__notes">
           <span>📝</span> ${v.notes}
         </div>
       ` : ""}
@@ -464,6 +543,7 @@ function renderTechTab(v) {
     [t("vehicle_category"),   vehicleCategoryLabel(v.category)],
     [t("vehicle_plate"),      v.plate],
     [t("vehicle_vin"),        v.vin],
+    [t("vehicle_engine_code"), v.engineCode],
     [t("vehicle_year"),       v.year],
     [t("vehicle_first_reg"),  formatDate(v.firstRegDate)],
     [t("vehicle_engine_cc"),  v.engineCc ? v.engineCc + " cm³" : null],
@@ -476,7 +556,12 @@ function renderTechTab(v) {
       ? `<span class="fuel-level-text--${fuelLevelColorClass(v.fuelLevel)}">${fuelLevelLabel(v.fuelLevel)}</span>`
       : null],
     [t("vehicle_color"),      colorLabel(v.color)],
-    [t("vehicle_current_km"), v.currentKm ? v.currentKm.toLocaleString() + " km" : null],
+    [t("vehicle_current_km"), v.currentKm
+      ? v.currentKm.toLocaleString() + " km"
+        + (v.currentKmUpdatedAt
+            ? ` <span style="color:var(--color-danger,#dc2626);font-weight:700;margin-left:16px">${formatDate(v.currentKmUpdatedAt)}</span>`
+            : "")
+      : null],
     [t("vehicle_reg_expiry"), `${formatDate(v.regExpiry)}${regBadge(v)}`],
     [t("vehicle_insurance_company"), v.insuranceCompany],
     [t("vehicle_insurance_policy"),  v.insurancePolicy],
@@ -551,6 +636,7 @@ async function loadFinanceTab(container, v) {
     const totalServiceCost = snap.docs.reduce((sum, d) => sum + (Number(d.data().cost) || 0), 0);
 
     const rows = [
+      [t("vehicle_owner"),          v.ownerName],
       [t("vehicle_purchase_date"),  formatDate(v.purchaseDate)],
       [t("vehicle_purchase_type"),  v.purchaseType],
       [t("vehicle_purchase_value"), v.purchaseValue ? Number(v.purchaseValue).toLocaleString() + " RSD" : null],
@@ -602,7 +688,30 @@ async function loadServiceTab(container, vehicle) {
       return aResolved ? (db_ - da) : (da - db_);
     });
 
+    // Informacija o sledećem redovnom servisu (uvek vidljiva, bez obzira
+    // na "odloži podsetnik" sa dashboarda).
+    let nextServiceBanner = "";
+    try {
+      const settings = await getServiceSettings(S.companyId);
+      const info = vehicle.archived ? null : getRegularServiceInfo(vehicle, services, settings);
+      if (info) {
+        if (info.hasOpen) {
+          nextServiceBanner = `<div class="next-service-banner">🔧 <strong>${t("svc_next_regular")}:</strong> ${t("svc_next_regular_booked")}</div>`;
+        } else {
+          const when = t("svc_next_regular_date", { date: formatDate(info.nextDate) });
+          const kmPart = info.nextKm != null ? " " + t("svc_next_regular_km", { km: info.nextKm.toLocaleString() }) : "";
+          nextServiceBanner = `
+            <div class="next-service-banner ${info.alarm ? "next-service-banner--alarm" : ""}">
+              ${info.alarm ? "⚠️" : "🔧"} <strong>${t("svc_next_regular")}:</strong> ${when}${kmPart}
+              <div class="next-service-banner__sub">${nextServiceSummary(info)}</div>
+              ${info.customSettings ? `<div class="next-service-banner__custom">⚙️ ${t("svc_custom_badge")}</div>` : ""}
+            </div>`;
+        }
+      }
+    } catch (e) { /* banner je dodatak — greška ne sme da blokira tab */ }
+
     container.innerHTML = `
+      ${nextServiceBanner}
       ${canEdit ? `<div style="margin-bottom:12px"><button class="btn btn--primary btn--sm" id="btn-add-service">+ ${t("service_add")}</button></div>` : ""}
       ${services.length === 0
         ? `<div class="empty-state"><div class="empty-state__icon">🔧</div><p>${t("no_data")}</p></div>`
@@ -718,9 +827,12 @@ async function loadAssignmentsTab(container, vehicle) {
 }
 
 // ── FORMA ZA DODAVANJE / EDITOVANJE ──────────────────────────
-function openVehicleForm(vehicle = null) {
+async function openVehicleForm(vehicle = null) {
   const isEdit = !!vehicle;
   const v = vehicle || {};
+  // Firmska podrazumevana podešavanja servisnog podsetnika (prikazuju se kao placeholder)
+  const svcDefaults = await getServiceSettings(S.companyId);
+  const svcOv = cleanVehicleServiceOverrides(v.serviceSettings);
 
   const bodyHTML = `
     <div class="form-section-title">${t("vehicle_tab_tech")}</div>
@@ -772,6 +884,13 @@ function openVehicleForm(vehicle = null) {
     </div>
     <div class="form-row">
       <div class="form-group">
+        <label class="form-label">${t("vehicle_engine_code")}</label>
+        <input id="f-engineCode" class="form-input" type="text" value="${v.engineCode || ""}" style="text-transform:uppercase" />
+      </div>
+      <div class="form-group"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
         <label class="form-label">${t("vehicle_year")}</label>
         <input id="f-year" class="form-input" type="number" min="1990" max="2030" value="${v.year || ""}" />
       </div>
@@ -810,7 +929,7 @@ function openVehicleForm(vehicle = null) {
         <label class="form-label">${t("vehicle_fuel_type")}</label>
         <select id="f-fuelType" class="form-select">
           <option value="">—</option>
-          ${["petrol","diesel","lpg","electric","hybrid"].map(ft =>
+          ${["petrol","diesel","lpg","cng","electric","hybrid_petrol","hybrid_diesel","hybrid_tng_cng"].map(ft =>
             `<option value="${ft}" ${v.fuelType === ft ? "selected" : ""}>${t("fuel_" + ft)}</option>`
           ).join("")}
         </select>
@@ -917,6 +1036,13 @@ function openVehicleForm(vehicle = null) {
     <div class="form-section-title" style="margin-top:8px">${t("vehicle_tab_finance")}</div>
     <div class="form-row">
       <div class="form-group">
+        <label class="form-label">${t("vehicle_owner")}</label>
+        <input id="f-ownerName" class="form-input" type="text" value="${v.ownerName || ""}" />
+      </div>
+      <div class="form-group"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
         <label class="form-label">${t("vehicle_purchase_date")}</label>
         <input id="f-purchaseDate" class="form-input" type="text" inputmode="numeric" maxlength="10"
           placeholder="${datePlaceholder()}" value="${toDMY(v.purchaseDate)}" />
@@ -929,6 +1055,32 @@ function openVehicleForm(vehicle = null) {
     <div class="form-group">
       <label class="form-label">${t("vehicle_purchase_value")}</label>
       <input id="f-purchaseValue" class="form-input" type="number" value="${v.purchaseValue || ""}" />
+    </div>
+    <div class="form-section-title">🔧 ${t("svc_vehicle_section")}</div>
+    <p class="form-hint">${t("svc_vehicle_hint")}</p>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">${t("svc_settings_interval_km")}</label>
+        <input id="f-svc-intervalKm" class="form-input" type="number" min="1"
+          value="${svcOv.intervalKm ?? ""}" placeholder="${t("svc_vehicle_default_ph", { n: svcDefaults.intervalKm.toLocaleString() })}" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">${t("svc_settings_interval_months")}</label>
+        <input id="f-svc-intervalMonths" class="form-input" type="number" min="1" step="1"
+          value="${svcOv.intervalMonths ?? ""}" placeholder="${t("svc_vehicle_default_ph", { n: svcDefaults.intervalMonths })}" />
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">${t("svc_settings_alarm_km")}</label>
+        <input id="f-svc-alarmKm" class="form-input" type="number" min="0"
+          value="${svcOv.alarmKm ?? ""}" placeholder="${t("svc_vehicle_default_ph", { n: svcDefaults.alarmKm.toLocaleString() })}" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">${t("svc_settings_alarm_days")}</label>
+        <input id="f-svc-alarmDays" class="form-input" type="number" min="0" step="1"
+          value="${svcOv.alarmDays ?? ""}" placeholder="${t("svc_vehicle_default_ph", { n: svcDefaults.alarmDays })}" />
+      </div>
     </div>
     <div class="form-group">
       <label class="form-label">${t("notes")}</label>
@@ -1010,6 +1162,7 @@ async function saveVehicle(vehicleId) {
   const model = document.getElementById("f-model")?.value.trim();
   const plate = document.getElementById("f-plate")?.value.trim().toUpperCase();
   const vin   = document.getElementById("f-vin")?.value.trim().toUpperCase() || null;
+  const engineCode = document.getElementById("f-engineCode")?.value.trim().toUpperCase() || null;
 
   // ── OSNOVNA VALIDACIJA ────────────────────────────────────────
   let valid = true;
@@ -1017,6 +1170,28 @@ async function saveVehicle(vehicleId) {
   if (!model) { fieldError("f-model", t("vehicle_model_required")); valid = false; }
   if (!plate) { fieldError("f-plate", t("vehicle_plate_required")); valid = false; }
   if (vin && vin.length > 17) { fieldError("f-vin", t("vehicle_vin_max_error")); valid = false; }
+
+  // Sopstvena podešavanja servisnog podsetnika (prazno = nasleđuje firmska)
+  const svcRaw = {
+    intervalKm:     document.getElementById("f-svc-intervalKm")?.value.trim(),
+    intervalMonths: document.getElementById("f-svc-intervalMonths")?.value.trim(),
+    alarmKm:        document.getElementById("f-svc-alarmKm")?.value.trim(),
+    alarmDays:      document.getElementById("f-svc-alarmDays")?.value.trim(),
+  };
+  const svcRules = {
+    intervalKm:     { min: 1, int: false },
+    intervalMonths: { min: 1, int: true },
+    alarmKm:        { min: 0, int: false },
+    alarmDays:      { min: 0, int: true },
+  };
+  Object.keys(svcRules).forEach(k => {
+    if (svcRaw[k] === "" || svcRaw[k] == null) return;
+    const n = Number(svcRaw[k]);
+    if (!isFinite(n) || n < svcRules[k].min || (svcRules[k].int && !Number.isInteger(n))) {
+      fieldError("f-svc-" + k, t("svc_vehicle_invalid"));
+      valid = false;
+    }
+  });
   if (!valid) throw new Error("validation");
 
   try {
@@ -1051,7 +1226,7 @@ async function saveVehicle(vehicleId) {
     const requiredEquipment = Array.from(document.querySelectorAll(".f-equipment:checked")).map(el => el.value);
 
     const data = {
-      brand, model, plate, vin,
+      brand, model, plate, vin, engineCode,
       vehicleType:      document.getElementById("f-vehicleType")?.value || null,
       category:         document.getElementById("f-category")?.value || null,
       year:             numOrNull("f-year"),
@@ -1076,8 +1251,17 @@ async function saveVehicle(vehicleId) {
       purchaseDate:     dateOrNull("f-purchaseDate"),
       purchaseType:     document.getElementById("f-purchaseType")?.value.trim() || null,
       purchaseValue:    numOrNull("f-purchaseValue"),
+      ownerName:        document.getElementById("f-ownerName")?.value.trim() || null,
+      serviceSettings:  (() => {
+        const ov = cleanVehicleServiceOverrides(svcRaw);
+        return Object.keys(ov).length ? ov : null;
+      })(),
       notes:            document.getElementById("f-notes")?.value.trim() || null,
     };
+
+    const prevKm = vehicleId ? (allVehicles.find(x => x.id === vehicleId)?.currentKm ?? null) : null;
+    const kmChanged = data.currentKm != null && data.currentKm !== prevKm;
+    if (kmChanged) data.currentKmUpdatedAt = serverTimestamp();
 
     if (vehicleId) {
       await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId), {
@@ -1228,9 +1412,21 @@ export async function openServiceForm(vehicle, service = null, prefill = null, o
   `;
 
   openModal(isEdit ? `${t("edit")}: ${t("service_type_" + s.serviceType) || s.serviceType}` : t("service_add"), bodyHTML, async () => {
-    const serviceDateVal = dateOrNull("sf-date");
+    let serviceDateVal = dateOrNull("sf-date");
     if (!serviceDateVal) return;
     try {
+      // Servis se ne zakazuje vikendom (subota → petak, nedelja → ponedeljak).
+      // Ne važi za servis koji je već obavljen (unos unazad) — tu se upisuje
+      // stvarni datum.
+      let weekendShifted = false;
+      const isDoneRecord = isEdit
+        ? effectiveServiceStatus(service) === SERVICE_STATUS.DONE
+        : !!document.getElementById("sf-already-done")?.checked;
+      if (!isDoneRecord && isWeekend(serviceDateVal)) {
+        serviceDateVal = shiftToWorkday(serviceDateVal, new Date());
+        weekendShifted = true;
+      }
+
       const selectedId = document.getElementById("sf-workshop-select")?.value || "";
       let workshop = null;
       let servicerId = null;
@@ -1283,7 +1479,20 @@ export async function openServiceForm(vehicle, service = null, prefill = null, o
         }
       }
 
-      showToast(t("success"), "success");
+      // Km uneta uz servis (km pri servisu ili km po završetku) postaje
+      // trenutna kilometraža vozila ako je veća od postojeće; pamti se i datum unosa.
+      const svcKm = Math.max(data.km || 0, data.endKm || 0);
+      if (svcKm > (Number(vehicle.currentKm) || 0)) {
+        await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicle.id), {
+          currentKm: svcKm,
+          currentKmUpdatedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        vehicle.currentKm = svcKm;
+        vehicle.currentKmUpdatedAt = new Date();
+      }
+
+      showToast(weekendShifted ? t("svc_weekend_shifted") : t("success"), "success");
       if (options.onSaved) {
         options.onSaved();
       } else {
@@ -1361,11 +1570,17 @@ function openCompleteServiceModal(vehicle, service) {
         status: service.previousVehicleStatus || "active",
         updatedAt: serverTimestamp(),
       };
-      if (endKm && endKm > (vehicle.currentKm || 0)) vehicleUpdate.currentKm = endKm;
+      if (endKm && endKm > (vehicle.currentKm || 0)) {
+        vehicleUpdate.currentKm = endKm;
+        vehicleUpdate.currentKmUpdatedAt = serverTimestamp();
+      }
       await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicle.id), vehicleUpdate);
 
       vehicle.status = vehicleUpdate.status;
-      if (vehicleUpdate.currentKm) vehicle.currentKm = vehicleUpdate.currentKm;
+      if (vehicleUpdate.currentKm) {
+        vehicle.currentKm = vehicleUpdate.currentKm;
+        vehicle.currentKmUpdatedAt = new Date();
+      }
       refreshVehicleHeaderBadge(vehicle);
       showToast(t("success"), "success");
       const content = document.getElementById("vehicle-tab-content");
@@ -1524,10 +1739,7 @@ function assignmentItem(a) {
 }
 
 function formatDate(val) {
-  if (!val) return "—";
-  const d = val.toDate ? val.toDate() : new Date(val);
-  const locale = getCurrentLang() === "en" ? "en-GB" : "sr-RS";
-  return isNaN(d) ? "—" : d.toLocaleDateString(locale);
+  return formatDateDMY(val);
 }
 
 // ── DATUMI: prikaz i unos u lokalnom formatu dd/mm/yyyy ──────
@@ -1544,7 +1756,7 @@ function toDMY(val) {
   if (isNaN(d)) return "";
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${dd}/${mm}/${d.getFullYear()}`;
+  return `${dd}.${mm}.${d.getFullYear()}`;
 }
 
 function todayDMY() {
@@ -1554,14 +1766,14 @@ function todayDMY() {
 // Placeholder prati jezik aplikacije (dd/mm ostaje fiksno — poslovno
 // pravilo firme — menja se samo naziv za "godinu": yyyy (en) / gggg (sr)).
 function datePlaceholder() {
-  return getCurrentLang() === "en" ? "dd/mm/yyyy" : "dd/mm/gggg";
+  return getCurrentLang() === "en" ? "dd.mm.yyyy" : "dd.mm.gggg";
 }
 
 // Parsira "dd/mm/yyyy" u Date objekat (lokalno vreme, ponoć). Vraća null
 // ako string nije kompletan ili predstavlja nepostojeći datum (npr. 31/02).
 function parseDMY(str) {
   if (!str) return null;
-  const m = str.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  const m = str.trim().match(/^(\d{1,2})[./](\d{1,2})[./](\d{4})\.?$/);
   if (!m) return null;
   const day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
   const d = new Date(year, month - 1, day);
@@ -1576,8 +1788,8 @@ function attachDateMask(id) {
   el.addEventListener("input", () => {
     const digits = el.value.replace(/\D/g, "").slice(0, 8);
     let out = digits;
-    if (digits.length > 4) out = `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
-    else if (digits.length > 2) out = `${digits.slice(0, 2)}/${digits.slice(2)}`;
+    if (digits.length > 4) out = `${digits.slice(0, 2)}.${digits.slice(2, 4)}.${digits.slice(4)}`;
+    else if (digits.length > 2) out = `${digits.slice(0, 2)}.${digits.slice(2)}`;
     el.value = out;
   });
 }

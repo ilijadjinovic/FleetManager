@@ -9,6 +9,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { t, loadLanguage, getCurrentLang, SUPPORTED_LANGS } from "./i18n.js";
 import { S, showToast, openModal, buildNav, rerenderCurrentTab } from "./app.js";
+import { normalizeServiceSettings } from "./service-status.js";
 
 // ── GLAVNI RENDER ─────────────────────────────────────────────
 export async function renderProfile(container) {
@@ -373,7 +374,9 @@ function openEditCompanyModal(company) {
 }
 
 // ── TAB: PODEŠAVANJA ──────────────────────────────────────────
-function renderSettingsTab({ profile }) {
+function renderSettingsTab({ profile, company }) {
+  const canEditServiceSettings = !!company && (profile.role === "fleet_admin" || profile.role === "master_admin");
+  const svc = normalizeServiceSettings(company?.serviceSettings);
   const currentLang = getCurrentLang();
   const isLocalLogin = !!profile.username;
   const canSetLocalLogin = profile.role === "fleet_admin" || profile.role === "master_admin";
@@ -396,6 +399,36 @@ function renderSettingsTab({ profile }) {
         </label>
       </div>
     </div>
+
+    ${canEditServiceSettings ? `
+      <div class="profile-section">
+        <div class="profile-section__header">
+          <h3 class="profile-section__title">🔧 ${t("svc_settings_section")}</h3>
+        </div>
+        <p class="form-hint">${t("svc_settings_hint")}</p>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">${t("svc_settings_interval_km")}</label>
+            <input id="svc-interval-km" class="form-input" type="number" min="1" value="${svc.intervalKm}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">${t("svc_settings_interval_months")}</label>
+            <input id="svc-interval-months" class="form-input" type="number" min="1" value="${svc.intervalMonths}" />
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">${t("svc_settings_alarm_km")}</label>
+            <input id="svc-alarm-km" class="form-input" type="number" min="0" value="${svc.alarmKm}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">${t("svc_settings_alarm_days")}</label>
+            <input id="svc-alarm-days" class="form-input" type="number" min="0" value="${svc.alarmDays}" />
+          </div>
+        </div>
+        <button class="btn btn--primary btn--sm" id="btn-save-service-settings">${t("svc_settings_save")}</button>
+      </div>
+    ` : ""}
 
     ${canSetLocalLogin ? `
       <div class="profile-section">
@@ -433,7 +466,7 @@ function renderSettingsTab({ profile }) {
   `;
 }
 
-function bindSettingsTab({ profile }) {
+function bindSettingsTab({ profile, company }) {
   // Promena jezika
   document.querySelectorAll("input[name='lang']").forEach(radio => {
     radio.addEventListener("change", async () => {
@@ -448,6 +481,28 @@ function bindSettingsTab({ profile }) {
       rerenderCurrentTab();
       showToast(radio.value === "sr" ? t("profile_lang_changed_sr") : t("profile_lang_changed_en"), "success");
     });
+  });
+
+  // Podešavanja servisnog podsetnika (fleet_admin / master_admin)
+  document.getElementById("btn-save-service-settings")?.addEventListener("click", async () => {
+    const val = (id) => document.getElementById(id)?.value;
+    const intervalKm = Number(val("svc-interval-km"));
+    const intervalMonths = Number(val("svc-interval-months"));
+    const alarmKm = Number(val("svc-alarm-km"));
+    const alarmDays = Number(val("svc-alarm-days"));
+    if (!(intervalKm > 0) || !(intervalMonths > 0) || !(alarmKm >= 0) || !(alarmDays >= 0)
+        || !Number.isInteger(intervalMonths) || !Number.isInteger(alarmDays)) {
+      showToast(t("svc_settings_invalid"), "error");
+      return;
+    }
+    const serviceSettings = { intervalKm, intervalMonths, alarmKm, alarmDays };
+    try {
+      await updateDoc(doc(db, "companies", company.id), { serviceSettings, updatedAt: serverTimestamp() });
+      company.serviceSettings = serviceSettings;
+      showToast(t("svc_settings_saved"), "success");
+    } catch (e) {
+      showToast(`${t("error")}: ${e.message}`, "error");
+    }
   });
 
   // Podešavanje lokalnog login-a (fleet_admin / master_admin)

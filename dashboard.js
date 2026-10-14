@@ -8,12 +8,15 @@ import {
   collection, query, where, getDocs, orderBy,
   doc, addDoc, updateDoc, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
-import { t, getCurrentLang } from "./i18n.js";
+import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
 import { S, setActiveCompany, navigateTo, showToast, openModal } from "./app.js";
 import { getCompanies } from "./firebase.js";
-import { isVehicleRegistered, needsTachograph, openVehicleDetail, fuelLevelScaleHTML, bindFuelLevelScale, fuelLevelLabel } from "./vehicles.js";
+import { isVehicleRegistered, needsTachograph, openVehicleDetail, openServiceForm, fuelLevelScaleHTML, bindFuelLevelScale, fuelLevelLabel } from "./vehicles.js";
 import { mountPendingBanner } from "./pending-requests.js";
-import { effectiveServiceStatus, isServiceToday, isServiceOverdue, overdueDays, SERVICE_STATUS } from "./service-status.js";
+import {
+  effectiveServiceStatus, isServiceToday, isServiceOverdue, overdueDays, SERVICE_STATUS,
+  getServiceSettings, getRegularServiceInfo, timeLeftText, kmLeftText
+} from "./service-status.js";
 import { openIncidentForm } from "./incidents.js";
 import { tripEntryCard } from "./trips.js";
 
@@ -26,6 +29,7 @@ import { tripEntryCard } from "./trips.js";
 // preko selectAssignment(), tako da sav postojeći kod ispod (forme,
 // čuvanje unosa, razduženje) ostaje nepromenjen i radi nad ispravnim
 // zaduženjem.
+let dashboardVehicles = []; // vozila sa poslednjeg učitavanja (za "Zakaži sada")
 let assignmentsState = new Map(); // assignmentId -> { assignment, vehicle, trip, entries }
 let activeAssignment = null;
 let activeVehicle    = null;
@@ -264,6 +268,35 @@ async function loadDashboardData() {
         return veh?.archived !== true;
       });
 
+    // Podsetnici za redovni servis (samo administracija parka). Sledeći
+    // servis se računa iz poslednjeg završenog redovnog servisa svakog vozila.
+    dashboardVehicles = vehicles;
+    let serviceReminders = [];
+    if (role !== "driver") {
+      try {
+        const settings = await getServiceSettings(cid);
+        const regSnap = await getDocs(
+          query(collection(db, "companies", cid, "services"), where("serviceType", "==", "regular"))
+        );
+        const byVehicle = new Map();
+        regSnap.docs.forEach(d => {
+          const sv = { id: d.id, ...d.data() };
+          if (!byVehicle.has(sv.vehicleId)) byVehicle.set(sv.vehicleId, []);
+          byVehicle.get(sv.vehicleId).push(sv);
+        });
+        activeVehicles.forEach(v => {
+          const info = getRegularServiceInfo(v, byVehicle.get(v.id) || [], settings);
+          if (info && info.alarm && !info.hasOpen && !info.snoozed) {
+            serviceReminders.push({ ...info, vehicle: v });
+          }
+        });
+        // Najhitniji (najviše prekoračen / najbliži rok) prvi
+        serviceReminders.sort((a, b) => a.urgency - b.urgency);
+      } catch (e) {
+        console.error("Service reminders error:", e);
+      }
+    }
+
     const isDriver = role === "driver";
 
     // Vozač: pronađi/otvori aktivnu vožnju za SVAKO aktivno zaduženje
@@ -279,7 +312,7 @@ async function loadDashboardData() {
 
     content.innerHTML = `
       ${isDriver ? renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSnap, vehicles, resolvedActiveTrips) : renderAdminDashboard({
-        total, active, inService, unregistered, broken, inactive, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount
+        total, active, inService, unregistered, broken, inactive, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount, serviceReminders
       })}
     `;
 
@@ -294,7 +327,7 @@ async function loadDashboardData() {
   }
 }
 
-function renderAdminDashboard({ total, active, inService, unregistered, broken, inactive, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount }) {
+function renderAdminDashboard({ total, active, inService, unregistered, broken, inactive, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount, serviceReminders = [] }) {
   const today = new Date();
   today.setHours(0, 0, 0, 0); // lokalna ponoć
 
@@ -370,7 +403,38 @@ function renderAdminDashboard({ total, active, inService, unregistered, broken, 
 
       <div class="dashboard-panel">
         <h3 class="panel-title" data-i18n="schedule_panel_title">📅 ${t("schedule_panel_title")}</h3>
-        ${!upcomingScheduled || upcomingScheduled.length === 0
+        ${serviceReminders.map(r => {
+          const v = r.vehicle;
+          const late = r.daysLeft < 0 || (r.kmLeft != null && r.kmLeft < 0);
+          const reasons = [];
+          if (r.dateAlarm) reasons.push(`📅 ${timeLeftText(r.daysLeft)}`);
+          if (r.kmAlarm)   reasons.push(`🛣️ ${kmLeftText(r.kmLeft)}`);
+          const lastKm = r.kmSinceLast != null && r.kmSinceLast >= 0
+            ? ` (${t("svc_rem_last_km", { n: r.kmSinceLast.toLocaleString() })})` : "";
+          const dueKm = r.nextKm != null ? ` / ${r.nextKm.toLocaleString()} km` : "";
+          return `
+            <div class="upcoming-item upcoming-item--${late ? "urgent" : "warning"} service-reminder" data-reminder-vehicle="${v.id}">
+              <div class="service-reminder__body">
+                <div class="upcoming-item__main">
+                  <span class="upcoming-item__name">⚠️ ${v.brand || ""} ${v.model || ""}</span>
+                  <span class="upcoming-item__plate">${v.plate || ""}</span>
+                  <span class="upcoming-item__kind">${t("svc_rem_title")}</span>
+                  ${r.customSettings ? `<span class="service-reminder__custom" title="${t("svc_custom_badge")}">⚙️ ${t("svc_custom_badge_short")}</span>` : ""}
+                </div>
+                <div class="service-reminder__info">
+                  ${t("svc_rem_last", { date: formatDate(r.lastDate) })}${lastKm}<br>
+                  ${t("svc_rem_next_due", { date: formatDate(r.nextDate), km: dueKm })}<br>
+                  <strong>${reasons.join(" · ")}</strong>
+                </div>
+                <div class="service-reminder__question">${t("svc_rem_question")}</div>
+                <div class="service-reminder__actions">
+                  <button class="btn btn--primary btn--sm btn-reminder-schedule" data-vehicle="${v.id}">${t("svc_rem_schedule_now")}</button>
+                  <button class="btn btn--secondary btn--sm btn-reminder-snooze" data-vehicle="${v.id}">${t("svc_rem_snooze")}</button>
+                </div>
+              </div>
+            </div>`;
+        }).join("")}
+        ${(!upcomingScheduled || upcomingScheduled.length === 0) && serviceReminders.length > 0 ? "" : !upcomingScheduled || upcomingScheduled.length === 0
           ? `<p class="empty-text">${t("schedule_no_data")}</p>`
           : upcomingScheduled.map(s => {
               const d = s.serviceDate?.toDate ? s.serviceDate.toDate() : new Date(s.serviceDate);
@@ -713,6 +777,7 @@ function validateKmInput(rawValue, errorElId) {
 async function bumpVehicleKm(newKm, fuelLevel = null) {
   const update = {
     currentKm: newKm,
+    currentKmUpdatedAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   };
   if (fuelLevel) update.fuelLevel = fuelLevel;
@@ -739,6 +804,7 @@ function bindKmConfirm(aid) {
   document.querySelector(`[data-action="confirm-km"][data-assignment-id="${suffix}"]`)?.addEventListener("click", async () => {
     selectAssignment(aid);
     const fuelLevel = document.getElementById(`km-confirm-fuelLevel-${suffix}`)?.value || null;
+    const fuelMismatch = !!(fuelLevel && activeVehicle?.fuelLevel && fuelLevel !== activeVehicle.fuelLevel);
 
     try {
       const updateData = {
@@ -749,7 +815,6 @@ function bindKmConfirm(aid) {
       };
       if (fuelLevel) updateData.fuelLevelConfirmedValue = fuelLevel;
 
-      const fuelMismatch = !!(fuelLevel && activeVehicle?.fuelLevel && fuelLevel !== activeVehicle.fuelLevel);
       if (fuelMismatch) {
         updateData.fuelLevelMismatch = true;
         updateData.systemFuelLevel   = activeVehicle?.fuelLevel || null;
@@ -1070,6 +1135,7 @@ function openFuelForm() {
           <option value="diesel">${t("fuel_diesel")}</option>
           <option value="petrol">${t("fuel_petrol")}</option>
           <option value="lpg">${t("fuel_lpg")}</option>
+          <option value="cng">${t("fuel_cng")}</option>
           <option value="electric">${t("fuel_electric")}</option>
         </select>
       </div>
@@ -1331,6 +1397,7 @@ async function processDriverUnassign() {
 
     const vehicleUpdate = {
       currentKm:          endKm,
+      currentKmUpdatedAt: serverTimestamp(),
       assignedDriverName: null,
       updatedAt:          serverTimestamp(),
     };
@@ -1427,18 +1494,18 @@ function todayDMY() {
   const d = new Date();
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${dd}/${mm}/${d.getFullYear()}`;
+  return `${dd}.${mm}.${d.getFullYear()}`;
 }
 
 // Placeholder prati jezik aplikacije (dd/mm ostaje fiksno — poslovno
 // pravilo firme — menja se samo naziv za "godinu": yyyy (en) / gggg (sr)).
 function datePlaceholder() {
-  return getCurrentLang() === "en" ? "dd/mm/yyyy" : "dd/mm/gggg";
+  return getCurrentLang() === "en" ? "dd.mm.yyyy" : "dd.mm.gggg";
 }
 
 function parseDMY(str) {
   if (!str) return null;
-  const m = String(str).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  const m = String(str).trim().match(/^(\d{1,2})[./](\d{1,2})[./](\d{4})\.?$/);
   if (!m) return null;
   const day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
   const d = new Date(year, month - 1, day);
@@ -1452,8 +1519,8 @@ function attachDateMask(id) {
   el.addEventListener("input", () => {
     const digits = el.value.replace(/\D/g, "").slice(0, 8);
     let out = digits;
-    if (digits.length > 4) out = `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
-    else if (digits.length > 2) out = `${digits.slice(0, 2)}/${digits.slice(2)}`;
+    if (digits.length > 4) out = `${digits.slice(0, 2)}.${digits.slice(2, 4)}.${digits.slice(4)}`;
+    else if (digits.length > 2) out = `${digits.slice(0, 2)}.${digits.slice(2)}`;
     el.value = out;
   });
 }
@@ -1479,6 +1546,38 @@ function attachDashboardEvents() {
     });
   });
 
+  // Podsetnik za redovni servis: "Zakaži sada" → forma za dodavanje servisa
+  document.querySelectorAll(".btn-reminder-schedule").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const vehicle = dashboardVehicles.find(v => v.id === btn.dataset.vehicle);
+      if (!vehicle) return;
+      await openServiceForm(vehicle, null, { serviceType: "regular" }, {
+        onSaved: () => loadDashboardData(),
+      });
+    });
+  });
+
+  // Podsetnik za redovni servis: "Podseti me kasnije" → odloži za 1 dan
+  document.querySelectorAll(".btn-reminder-snooze").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const vehicleId = btn.dataset.vehicle;
+      try {
+        const until = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId), {
+          serviceReminderSnoozedUntil: until,
+        });
+        const v = dashboardVehicles.find(x => x.id === vehicleId);
+        if (v) v.serviceReminderSnoozedUntil = until;
+        showToast(t("svc_rem_snoozed_toast"), "success");
+        loadDashboardData();
+      } catch (err) {
+        showToast(`${t("error")}: ${err.message}`, "error");
+      }
+    });
+  });
+
   // Klik na zakazani servis u panelu → detalji vozila, tab "Servisna istorija"
   document.querySelectorAll("[data-vehicle-id]").forEach(item => {
     item.addEventListener("click", () => {
@@ -1494,9 +1593,6 @@ function attachDashboardEvents() {
 }
 
 function formatDate(date) {
-  if (!date) return "—";
-  const d = date.toDate ? date.toDate() : (date instanceof Date ? date : new Date(date));
-  const locale = getCurrentLang() === "en" ? "en-GB" : "sr-RS";
-  return isNaN(d) ? "—" : d.toLocaleDateString(locale);
+  return formatDateDMY(date);
 }
 

@@ -69,6 +69,7 @@
   --font-mono: 'Consolas', 'Courier New', monospace;
 
   --nav-height: 64px;
+  --sidebar-width: 76px;
   --header-height: 56px;
   --content-max: 900px;
 }
@@ -165,6 +166,14 @@ body {
   flex-direction: column;
   min-height: 100dvh;
 }
+.app:has(> #main-nav) {
+  padding-left: var(--sidebar-width); /* mesto za levi vertikalni meni (ne važi za ekrane registracije/blokade) */
+}
+
+/* Header ide preko cele širine, iznad levog menija */
+.app-header {
+  margin-left: calc(-1 * var(--sidebar-width));
+}
 
 .app-header {
   position: sticky;
@@ -228,32 +237,34 @@ body {
 .content {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 16px calc(var(--nav-height) + 20px);
+  padding: 20px 16px 24px;
   max-width: var(--content-max);
   margin: 0 auto;
   width: 100%;
 }
 
-/* ── BOTTOM NAV ─────────────────────────────────────────── */
+/* ── LEFT SIDEBAR NAV ───────────────────────────────────── */
 .main-nav {
   position: fixed;
+  top: var(--header-height);
   bottom: 0;
   left: 0;
-  right: 0;
+  width: var(--sidebar-width);
   z-index: 100;
-  height: var(--nav-height);
   background: var(--color-nav-bg);
-  border-top: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
   display: flex;
+  flex-direction: column;
   align-items: stretch;
-  overflow-x: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   scrollbar-width: none;
 }
 .main-nav::-webkit-scrollbar { display: none; }
 
 .nav-btn {
-  flex: 1;
-  min-width: 56px;
+  flex: 0 0 auto;
+  min-height: 64px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -264,7 +275,7 @@ body {
   color: var(--color-text-muted);
   cursor: pointer;
   transition: all 0.15s;
-  padding: 8px 4px;
+  padding: 10px 4px;
   position: relative;
 }
 
@@ -272,20 +283,105 @@ body {
 
 .nav-btn--active {
   color: var(--color-primary);
+  background: rgba(255,255,255,0.04);
 }
 .nav-btn--active::after {
   content: "";
   position: absolute;
-  top: 0;
-  left: 20%;
-  right: 20%;
-  height: 2px;
+  left: 0;
+  top: 20%;
+  bottom: 20%;
+  width: 3px;
   background: var(--color-primary);
-  border-radius: 0 0 2px 2px;
+  border-radius: 0 2px 2px 0;
 }
 
-.nav-btn__icon { font-size: 20px; line-height: 1; }
-.nav-btn__label { font-size: 10px; font-weight: 500; white-space: nowrap; }
+.nav-btn__icon { font-size: 22px; line-height: 1; }
+.nav-btn__label {
+  font-size: 10px;
+  font-weight: 500;
+  max-width: 100%;
+  padding: 0 2px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Hamburger dugme — vidljivo samo na telefonima */
+.nav-toggle {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  width: 40px;
+  height: 40px;
+  margin-left: -8px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  padding: 0;
+}
+.nav-toggle:hover { background: rgba(255,255,255,0.06); }
+.nav-toggle span {
+  display: block;
+  width: 20px;
+  height: 2px;
+  background: var(--color-text);
+  border-radius: 2px;
+  transition: transform 0.2s, opacity 0.2s;
+}
+body.nav-open .nav-toggle span:nth-child(1) { transform: translateY(6px) rotate(45deg); }
+body.nav-open .nav-toggle span:nth-child(2) { opacity: 0; }
+body.nav-open .nav-toggle span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); }
+
+.nav-overlay { display: none; }
+
+/* ── TELEFONI: meni je skriven i izlazi preko sadržaja ───── */
+@media (max-width: 768px) {
+  :root { --sidebar-width: 0px; }
+
+  .nav-toggle { display: flex; }
+
+  .main-nav {
+    width: 240px;
+    max-width: 80vw;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: none;
+    z-index: 110;
+  }
+  body.nav-open .main-nav {
+    transform: translateX(0);
+    box-shadow: var(--shadow-lg);
+  }
+
+  /* U izvučenom meniju stavke idu horizontalno: ikona + naziv */
+  .nav-btn {
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 14px;
+    min-height: 52px;
+    padding: 0 20px;
+  }
+  .nav-btn__label { font-size: 15px; font-weight: 500; max-width: none; padding: 0; text-align: left; }
+
+  .nav-overlay {
+    display: block;
+    position: fixed;
+    top: var(--header-height);
+    left: 0; right: 0; bottom: 0;
+    z-index: 105;
+    background: rgba(0,0,0,0.55);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+  body.nav-open .nav-overlay { opacity: 1; pointer-events: auto; }
+  body.nav-open { overflow: hidden; }
+}
 
 /* ── BUTTONS ────────────────────────────────────────────── */
 .btn {
@@ -440,6 +536,24 @@ body {
   letter-spacing: -0.02em;
 }
 
+.page-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sort-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sort-control .form-input--sm {
+  width: auto;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
 /* ── CARDS ──────────────────────────────────────────────── */
 /* Zajednička osnova za sve "surface" kartice u aplikaciji — pozadina,
    okvir i zaobljenje su identični na ~19 mesta u fajlu; svaka kartica
@@ -451,8 +565,6 @@ body {
 .vehicle-card-preview,
 .company-card,
 .servicer-card,
-.vehicle-card,
-.driver-card,
 .assignment-card,
 .trip-vehicle-card,
 .trip-history-card,
@@ -820,8 +932,8 @@ tbody td {
 /* ── TOAST ──────────────────────────────────────────────── */
 .toast {
   position: fixed;
-  bottom: calc(var(--nav-height) + 12px);
-  left: 50%;
+  bottom: 20px;
+  left: calc(50% + var(--sidebar-width) / 2);
   transform: translateX(-50%) translateY(8px);
   background: var(--color-surface-3);
   border: 1px solid var(--color-border);
@@ -835,7 +947,7 @@ tbody td {
   opacity: 0;
   transition: all 0.25s ease;
   white-space: nowrap;
-  max-width: calc(100vw - 32px);
+  max-width: calc(100vw - var(--sidebar-width) - 32px);
   text-align: center;
 }
 .toast--visible { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -1288,50 +1400,96 @@ tbody td {
 }
 .btn--icon:hover { background: var(--color-surface-3); }
 
-/* ── VEHICLE GRID ────────────────────────────────────────── */
-.vehicle-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 14px;
+/* ── VEHICLE LIST (tabelarni prikaz, grupisan po vlasniku) ─── */
+.vehicle-table-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
 }
 
-.vehicle-card {
-  padding: 14px;
+.vehicle-owner-group__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--color-surface-3);
+  border: 1px solid var(--color-primary);
+  border-left: 4px solid var(--color-primary);
+  border-bottom: none;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.15);
+}
+.vehicle-owner-group__icon { font-size: 15px; opacity: 0.95; color: var(--color-primary); }
+.vehicle-owner-group__name { font-size: 13px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; color: var(--color-text); }
+.vehicle-owner-group__count {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: var(--color-surface-3);
+  padding: 1px 9px;
+  border-radius: 999px;
+}
+
+.vehicle-table {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  overflow: hidden;
+}
+
+.vehicle-row {
+  padding: 14px 16px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background 0.15s;
   display: flex; flex-direction: column; gap: 10px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
 }
-.vehicle-card:hover {
-  border-color: var(--color-primary);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-md);
-}
-.vehicle-card--archived {
+.vehicle-row:last-child { border-bottom: none; }
+.vehicle-row:hover { background: var(--color-surface-2); }
+.vehicle-row--archived {
   opacity: 0.55;
   filter: grayscale(0.6);
 }
-.vehicle-card--archived:hover {
-  border-color: var(--color-border-light);
-  box-shadow: none;
+.vehicle-row--archived:hover { background: var(--color-surface); }
+
+.vehicle-row__top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
 }
-.vehicle-card__header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
-.vehicle-card__name   { font-size: 15px; font-weight: 700; }
-.vehicle-card__plate  { font-size: 12px; font-family: var(--font-mono); color: var(--color-text-muted); margin-top: 2px; }
-.vehicle-card__details{ display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.vehicle-card__detail { display: flex; flex-direction: column; gap: 2px; }
-.vehicle-card__detail--warn .vehicle-card__detail-value { color: var(--color-warning); }
-.vehicle-card__detail-label { font-size: 10px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
-.vehicle-card__detail-value { font-size: 12px; font-weight: 600; }
+.vehicle-row__info { min-width: 160px; }
+.vehicle-row__name  { font-size: 15px; font-weight: 700; }
+.vehicle-row__plate { font-size: 12px; font-family: var(--font-mono); color: var(--color-text-muted); margin-top: 2px; }
+.vehicle-row__badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+.vehicle-row__fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px 20px;
+}
+.vehicle-row__field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.vehicle-row__field--warn .vehicle-row__field-value { color: var(--color-warning); }
+.vehicle-row__field-label { font-size: 10px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+.vehicle-row__field-value {
+  font-size: 13px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .reg-warn { font-size: 11px; color: var(--color-danger); font-weight: 700; }
-.vehicle-card__driver {
-  font-size: 12px; color: var(--color-text-muted);
-  padding-top: 8px; border-top: 1px solid var(--color-border);
-}
-.vehicle-card__notes {
+
+.vehicle-row__notes {
   font-size: 12px; color: var(--color-text-muted); font-style: italic;
-  padding-top: 8px; margin-top: 8px; border-top: 1px solid var(--color-border);
+  padding-top: 8px; border-top: 1px solid var(--color-border);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+@media (max-width: 640px) {
+  .vehicle-row__fields { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
 }
 
 /* ── DETAIL VIEW ─────────────────────────────────────────── */
@@ -1449,46 +1607,66 @@ tbody td {
 .mono { font-family: var(--font-mono); }
 
 /* ── DRIVERS ─────────────────────────────────────────────── */
-.drivers-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 14px;
+/* ── DRIVER LIST (tabelarni prikaz, isti fazon kao vozila) ─── */
+.driver-table-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
 }
 
-.driver-card {
-  padding: 14px;
-  cursor: pointer;
-  transition: all 0.15s;
+.driver-table {
   display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.driver-row {
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: background 0.15s;
+  display: flex; flex-direction: column; gap: 10px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+.driver-row:last-child { border-bottom: none; }
+.driver-row:hover { background: var(--color-surface-2); }
+.driver-row--inactive {
+  opacity: 0.55;
+  filter: grayscale(0.6);
+}
+.driver-row--inactive:hover { background: var(--color-surface); }
+
+.driver-row__top {
+  display: flex;
+  justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
-  position: relative;
+  flex-wrap: wrap;
 }
-.driver-card:hover {
-  border-color: var(--color-primary);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-md);
-}
-.driver-card--inactive { opacity: 0.6; }
+.driver-row__info { min-width: 160px; }
+.driver-row__name     { font-size: 15px; font-weight: 700; }
+.driver-row__position { font-size: 12px; color: var(--color-text-muted); margin-top: 2px; }
+.driver-row__badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
-.driver-card__avatar {
-  width: 44px; height: 44px;
-  border-radius: 50%;
-  background: var(--color-primary);
-  color: #fff;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 15px; font-weight: 700;
+.driver-row__fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px 20px;
+}
+.driver-row__field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.driver-row__field-label { font-size: 10px; color: var(--color-text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+.driver-row__field-value {
+  font-size: 13px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.driver-row__actions {
+  display: flex; align-items: center; gap: 4px;
   flex-shrink: 0;
 }
 
-.driver-card__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
-.driver-card__header { display: flex; justify-content: space-between; align-items: flex-start; gap: 6px; }
-.driver-card__name { font-size: 15px; font-weight: 700; }
-.driver-card__position { font-size: 12px; color: var(--color-text-muted); }
-.driver-card__details { display: flex; flex-wrap: wrap; gap: 8px; }
-.driver-detail { font-size: 12px; color: var(--color-text-muted); }
-
-.driver-card__login { display: flex; gap: 6px; flex-wrap: wrap; }
 .login-chip {
   font-size: 10px; font-weight: 700; padding: 2px 8px;
   border-radius: 10px; border: 1px solid;
@@ -1497,9 +1675,8 @@ tbody td {
 .login-chip--local  { background: rgba(34,197,94,0.12);  color: var(--color-success); border-color: var(--color-success); }
 .login-chip--none   { background: var(--color-slate-soft); color: var(--color-slate-dark); border-color: var(--color-slate-darker); }
 
-.driver-card__actions {
-  display: flex; flex-direction: column; gap: 4px;
-  flex-shrink: 0;
+@media (max-width: 640px) {
+  .driver-row__fields { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
 }
 
 /* Driver detail */
@@ -2332,3 +2509,26 @@ tbody td {
   font-family: var(--font-mono);
   color: var(--color-text-muted);
 }
+
+/* ── Podsetnik za redovni servis ─────────────────────────── */
+.service-reminder { display: block; }
+.service-reminder__body { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.service-reminder__info { font-size: 13px; line-height: 1.5; opacity: 0.9; }
+.service-reminder__question { font-size: 13px; font-weight: 600; margin-top: 2px; }
+.service-reminder__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+
+.next-service-banner {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border-left: 3px solid var(--color-success);
+  background: rgba(34,197,94,0.08);
+  font-size: 14px;
+}
+.next-service-banner--alarm {
+  border-left-color: var(--color-warning);
+  background: var(--color-warning-bg-faint);
+}
+.next-service-banner__sub { font-size: 13px; opacity: 0.85; margin-top: 2px; }
+.next-service-banner__custom { font-size: 12px; opacity: 0.75; margin-top: 2px; }
+.service-reminder__custom { font-size: 11px; opacity: 0.8; margin-left: 6px; white-space: nowrap; }

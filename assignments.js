@@ -8,7 +8,7 @@ import {
   collection, query, orderBy, getDocs, doc,
   addDoc, updateDoc, serverTimestamp, where, Timestamp
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
-import { t, getCurrentLang } from "./i18n.js";
+import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
 import { S, showToast, openModal } from "./app.js";
 import { fuelLevelLabel } from "./vehicles.js";
 
@@ -604,6 +604,7 @@ async function saveAssignment(assignmentId, existing) {
     if (startKm && vehicle) {
       await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId), {
         currentKm:          Number(startKm),
+        currentKmUpdatedAt: serverTimestamp(),
         assignedDriverName: `${driver?.firstName} ${driver?.lastName}`,
         updatedAt:          serverTimestamp(),
       });
@@ -626,7 +627,7 @@ function showConflictDialog(existingAssignment, newDriver, suggestedCloseDate) {
     document.getElementById("modal-overlay")?.classList.add("hidden");
 
     setTimeout(() => {
-      const dateStr = suggestedCloseDate.toLocaleDateString(getCurrentLang() === "en" ? "en-GB" : "sr-RS");
+      const dateStr = formatDateDMY(suggestedCloseDate);
       const bodyHTML = `
         <div class="conflict-dialog">
           <div class="conflict-dialog__icon">⚠️</div>
@@ -762,6 +763,7 @@ async function processUnassign(assignment) {
         doc(db, "companies", S.companyId, "vehicles", assignment.vehicleId),
         {
           currentKm:          Number(endKm),
+          currentKmUpdatedAt: serverTimestamp(),
           assignedDriverName: null,
           updatedAt:          serverTimestamp(),
         }
@@ -801,10 +803,7 @@ async function processUnassign(assignment) {
 
 // ── UTILS ─────────────────────────────────────────────────────
 function formatDate(val) {
-  if (!val) return "—";
-  const d = val.toDate ? val.toDate() : new Date(val);
-  const locale = getCurrentLang() === "en" ? "en-GB" : "sr-RS";
-  return isNaN(d) ? "—" : d.toLocaleDateString(locale);
+  return formatDateDMY(val);
 }
 
 // ── DATUMI: prikaz i unos u lokalnom formatu dd/mm/yyyy ──────
@@ -817,7 +816,7 @@ function toDMY(val) {
   if (isNaN(d)) return "";
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${dd}/${mm}/${d.getFullYear()}`;
+  return `${dd}.${mm}.${d.getFullYear()}`;
 }
 
 function todayDMY() {
@@ -827,12 +826,12 @@ function todayDMY() {
 // Placeholder prati jezik aplikacije (dd/mm ostaje fiksno — poslovno
 // pravilo firme — menja se samo naziv za "godinu": yyyy (en) / gggg (sr)).
 function datePlaceholder() {
-  return getCurrentLang() === "en" ? "dd/mm/yyyy" : "dd/mm/gggg";
+  return getCurrentLang() === "en" ? "dd.mm.yyyy" : "dd.mm.gggg";
 }
 
 function parseDMY(str) {
   if (!str) return null;
-  const m = String(str).trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  const m = String(str).trim().match(/^(\d{1,2})[./](\d{1,2})[./](\d{4})\.?$/);
   if (!m) return null;
   const day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
   const d = new Date(year, month - 1, day);
@@ -846,8 +845,8 @@ function attachDateMask(id) {
   el.addEventListener("input", () => {
     const digits = el.value.replace(/\D/g, "").slice(0, 8);
     let out = digits;
-    if (digits.length > 4) out = `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
-    else if (digits.length > 2) out = `${digits.slice(0, 2)}/${digits.slice(2)}`;
+    if (digits.length > 4) out = `${digits.slice(0, 2)}.${digits.slice(2, 4)}.${digits.slice(4)}`;
+    else if (digits.length > 2) out = `${digits.slice(0, 2)}.${digits.slice(2)}`;
     el.value = out;
   });
 }

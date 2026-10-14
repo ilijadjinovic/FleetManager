@@ -74,7 +74,7 @@ service cloud.firestore {
         // assignedDriverName pri sopstvenom razduženju (samo na null)
         allow update: if isDriver(companyId)
           && request.resource.data.diff(resource.data).affectedKeys()
-              .hasOnly(['currentKm', 'updatedAt', 'assignedDriverName'])
+              .hasOnly(['currentKm', 'currentKmUpdatedAt', 'updatedAt', 'assignedDriverName', 'fuelLevel'])
           && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['assignedDriverName'])
               || request.resource.data.assignedDriverName == null);
       }
@@ -101,7 +101,21 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys()
               .hasOnly(['status', 'endDate', 'endKm', 'kmMismatch',
                         'driverStartKm', 'unassignNotes', 'closedByDriver', 'updatedAt',
-                        'kmConfirmed', 'kmConfirmedValue', 'kmConfirmedAt']);
+                        'kmConfirmed', 'kmConfirmedValue', 'kmConfirmedAt',
+                        'fuelLevel', 'fuelLevelConfirmedValue', 'fuelLevelMismatch',
+                        'systemFuelLevel']);
+      }
+
+      // ── VOŽNJE (trips) ────────────────────────────────────
+      // Ranije bez pravila → sve zabranjeno, pa vozač nije mogao da
+      // otvori/zatvori vožnju pri preuzimanju zaduženja.
+      match /trips/{tripId} {
+        allow read: if isCompanyMember(companyId);
+        allow create: if isMasterAdmin() || isFleetAdmin(companyId)
+          || (isDriver(companyId) && request.resource.data.driverUid == request.auth.uid);
+        allow update: if isMasterAdmin() || isFleetAdmin(companyId)
+          || (isDriver(companyId) && resource.data.driverUid == request.auth.uid);
+        allow delete: if isMasterAdmin() || isFleetAdmin(companyId);
       }
 
       // ── TRIP ENTRIES (gorivo, putarine, prijave) ──────────
@@ -152,6 +166,14 @@ service cloud.firestore {
               || resource.data.recipientUid == request.auth.uid);
         allow delete: if isMasterAdmin() || isFleetAdmin(companyId);
       }
+    }
+
+    // ── USERNAME INDEKS (mapira username → interni auth email) ─
+    match /usernameIndex/{username} {
+      // Login ekran čita pre prijave, zato je čitanje javno
+      allow read: if true;
+      allow create, update, delete: if isMasterAdmin()
+        || (isAuth() && getUserData().role == 'fleet_admin');
     }
 
     // ── ADMIN NOTIFIKACIJE (pending zahtevi) ──────────────────
