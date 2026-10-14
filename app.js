@@ -208,11 +208,50 @@ export function buildNav() {
       <span class="nav-btn__icon">${TAB_ICONS[tab]}</span>
       <span class="nav-btn__label">${t(TAB_KEYS[tab]) || tab}</span>
     </button>
-  `).join("");
+  `).join("") + `
+    <button class="nav-btn nav-btn--about" id="nav-about" type="button">
+      <span class="nav-btn__icon">ℹ️</span>
+      <span class="nav-btn__label">${t("about_title")}</span>
+    </button>
+  `;
 
-  nav.querySelectorAll(".nav-btn").forEach(btn => {
+  nav.querySelectorAll(".nav-btn[data-tab]").forEach(btn => {
     btn.addEventListener("click", () => { setNavOpen(false); navigateTo(btn.dataset.tab); });
   });
+  document.getElementById("nav-about")?.addEventListener("click", () => {
+    setNavOpen(false);
+    openModal(t("about_title"), aboutHTML());
+    const cancelBtn = document.getElementById("modal-cancel");
+    if (cancelBtn) cancelBtn.textContent = t("close");
+  });
+
+  // Uloga prijavljenog korisnika u zaglavlju
+  const roleEl = document.getElementById("header-role");
+  if (roleEl) {
+    roleEl.textContent = t("role_" + role);
+    roleEl.className = `header-role header-role--${role}`;
+  }
+}
+
+// ── O APLIKACIJI (prozor otvoren iz menija) ───────────────────
+function aboutHTML() {
+  return `
+    <div class="about-card about-card--modal">
+      <div class="about-card__author">
+        <div class="about-card__avatar">ИЂ</div>
+        <div>
+          <div class="about-card__name">Ilija Đinović, d.i.e.</div>
+          <div class="about-card__role">${t("about_role")}</div>
+        </div>
+      </div>
+      <div class="about-card__divider"></div>
+      <div class="about-card__row"><img src="assets/icon-192.png" alt="" class="about-card__icon" /> <span>Fleet Manager v1.0</span></div>
+      <div class="about-card__row">🏢 <span>Biro za veštačenja</span></div>
+      <div class="about-card__row">✉️ <span>info@bzv.rs</span></div>
+      <div class="about-card__row">🌐 <a href="https://www.bzv.rs" target="_blank" rel="noopener">www.bzv.rs</a></div>
+      <div class="about-card__row">📞 <span>+381(0)62303303</span></div>
+    </div>
+  `;
 }
 
 export function navigateTo(tab) {

@@ -296,6 +296,34 @@ body {
   border-radius: 0 2px 2px 0;
 }
 
+/* "O aplikaciji" — uvek na dnu menija */
+.nav-btn--about {
+  margin-top: auto;
+  border-top: 1px solid var(--color-border);
+}
+
+/* Uloga prijavljenog korisnika u zaglavlju */
+.header-role {
+  display: inline-block;
+  max-width: 45vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--color-border);
+}
+.header-role.hidden { display: none; }
+@media (max-width: 360px) {
+  .app-header__name { display: none; }
+}
+
+.about-card.about-card--modal { margin-top: 0; padding: 0; border: none; background: none; box-shadow: none; }
+
 .nav-btn__icon { font-size: 22px; line-height: 1; }
 .nav-btn__label {
   font-size: 10px;

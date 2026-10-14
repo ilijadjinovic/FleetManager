@@ -149,25 +149,6 @@ function renderInfoTab({ profile, user, driverDoc, role }) {
     </div>
 
     <div class="profile-section">
-      <div class="about-card">
-        <div class="about-card__title">${t("about_title")}</div>
-        <div class="about-card__author">
-          <div class="about-card__avatar">ИЂ</div>
-          <div>
-            <div class="about-card__name">Ilija Đinović, d.i.e.</div>
-            <div class="about-card__role">${t("about_role")}</div>
-          </div>
-        </div>
-        <div class="about-card__divider"></div>
-        <div class="about-card__row"><img src="assets/icon-192.png" alt="" class="about-card__icon" /> <span>Fleet Manager v1.0</span></div>
-        <div class="about-card__row">🏢 <span>Biro za veštačenja</span></div>
-        <div class="about-card__row">✉️ <span>info@bzv.rs</span></div>
-        <div class="about-card__row">🌐 <a href="https://www.bzv.rs" target="_blank" rel="noopener">www.bzv.rs</a></div>
-        <div class="about-card__row">📞 <span>+381(0)62303303</span></div>
-      </div>
-    </div>
-
-    <div class="profile-section">
       <button class="btn btn--danger btn--sm" id="btn-logout-profile">🚪 ${t("logout")}</button>
     </div>
   `;

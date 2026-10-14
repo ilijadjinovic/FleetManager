@@ -1,5 +1,5 @@
 // sw.js — Fleet Manager Service Worker
-const CACHE_VERSION = "fleet-v6";
+const CACHE_VERSION = "fleet-v7";
 
 self.addEventListener("install", (e) => {
   self.skipWaiting();
