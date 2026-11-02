@@ -60,6 +60,12 @@ export async function renderDrivers(container) {
     document.getElementById("btn-add-driver")?.addEventListener("click", () => openDriverForm());
   }
 
+  // UI mora da prikaže zapamćeni filter/pretragu (npr. posle povratka iz detalja vozača)
+  document.querySelectorAll(".filter-chips .chip").forEach(c =>
+    c.classList.toggle("chip--active", c.dataset.filter === filterStatus));
+  const driverSearchEl = document.getElementById("driver-search");
+  if (driverSearchEl) driverSearchEl.value = searchTerm;
+
   document.getElementById("driver-search")?.addEventListener("input", (e) => {
     searchTerm = e.target.value.toLowerCase();
     renderList();

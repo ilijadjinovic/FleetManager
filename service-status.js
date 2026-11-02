@@ -276,3 +276,40 @@ export function nextServiceSummary(info) {
   if (info.kmLeft != null) parts.push(kmLeftText(info.kmLeft));
   return parts.join(" · ");
 }
+
+
+// ── SEZONSKE GUME ─────────────────────────────────────────────
+// Zakonski rokovi (svake godine isti):
+//   zimske gume: od 01.11. do 31.03.
+//   letnje gume: od 01.04. do 30.10.
+// Podsetnik se pokazuje MESEC DANA pre roka: od 01.10. (za zimske,
+// rok 01.11.) i od 01.03. (za letnje, rok 01.04.). Posle roka stavka
+// ostaje kao "kasni" dok se vrsta guma na vozilu ne ažurira.
+// Vozila bez upisane vrste guma i sa "all season" gumama se ne prikazuju.
+// Vraća null ili { needed: "winter"|"summer", deadline: Date, daysLeft, overdue }.
+export function getTireSeasonReminder(vehicle, now = new Date()) {
+  const type = vehicle?.tires?.type;
+  if (!type || type === "all_season") return null;
+
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const y = today.getFullYear();
+  const m = today.getMonth(); // 0–11
+  const dayMs = 24 * 60 * 60 * 1000;
+  const make = (needed, deadline, overdue) => ({
+    needed, deadline, overdue,
+    daysLeft: Math.round((deadline - today) / dayMs),
+  });
+
+  // Oktobar: mesec dana pre zimskog roka (01.11.)
+  if (m === 9) return type === "summer" ? make("winter", new Date(y, 10, 1), false) : null;
+  // Mart: mesec dana pre letnjeg roka (01.04.)
+  if (m === 2) return type === "winter" ? make("summer", new Date(y, 3, 1), false) : null;
+
+  // Novembar–februar: moraju biti zimske (rok je bio 01.11.)
+  if (m >= 10 || m <= 1) {
+    const deadline = new Date(m >= 10 ? y : y - 1, 10, 1);
+    return type === "summer" ? make("winter", deadline, true) : null;
+  }
+  // April–septembar: moraju biti letnje (rok je bio 01.04.)
+  return type === "winter" ? make("summer", new Date(y, 3, 1), true) : null;
+}

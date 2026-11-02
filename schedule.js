@@ -9,18 +9,13 @@ import {
   query, where, orderBy, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
+import { toDMY, datePlaceholder, attachDateMask, collectDates } from "./date-input.js";
 import { S, showToast, openModal } from "./app.js";
 import { getServiceProviders } from "./servicers.js";
 
 const SERVICE_TYPES = ["oil", "tires", "brakes", "technical", "registration", "ac", "other"];
 
-// Lokalni datum/vreme za <input type="date"/"time"> — bez UTC pomeranja (za razliku od toISOString)
-function toLocalDateInput(d) {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
-}
+// Lokalno vreme za <input type="time"> — bez UTC pomeranja (za razliku od toISOString)
 function toLocalTimeInput(d) {
   const hh = String(d.getHours()).padStart(2, "0");
   const mi = String(d.getMinutes()).padStart(2, "0");
@@ -38,7 +33,7 @@ export async function openScheduleForm(vehicle, options = {}) {
   const existingDate = existing?.scheduledDate
     ? (existing.scheduledDate.toDate ? existing.scheduledDate.toDate() : new Date(existing.scheduledDate))
     : null;
-  const dateVal0 = existingDate ? toLocalDateInput(existingDate) : "";
+  const dateVal0 = existingDate ? toDMY(existingDate) : "";
   const timeVal0 = existingDate ? toLocalTimeInput(existingDate) : "08:00";
 
   const typeOptions = SERVICE_TYPES.map(st =>
@@ -60,7 +55,8 @@ export async function openScheduleForm(vehicle, options = {}) {
 
       <div class="form-group">
         <label class="form-label">${t("schedule_date")}</label>
-        <input id="sch-date" class="form-input" type="date" value="${dateVal0}" />
+        <input id="sch-date" class="form-input" type="text" inputmode="numeric" maxlength="10"
+          placeholder="${datePlaceholder()}" value="${dateVal0}" />
       </div>
       <div class="form-group">
         <label class="form-label">${t("schedule_time")}</label>
@@ -117,18 +113,18 @@ export async function openScheduleForm(vehicle, options = {}) {
       : `📅 ${t("schedule_title_prefix")} — ${vehicle.brand} ${vehicle.model} (${vehicle.plate})`,
     bodyHTML,
     async () => {
-      const dateVal = document.getElementById("sch-date")?.value;
       const timeVal = document.getElementById("sch-time")?.value || "08:00";
       const type    = document.getElementById("sch-type")?.value;
 
-      if (!dateVal) {
-        const err = document.getElementById("sch-error");
-        err.textContent = t("schedule_date_required");
-        err.classList.remove("hidden");
-        throw new Error("validation");
-      }
+      // Datum: poruka ispod polja + fokus; `false` drži dijalog otvorenim
+      const schDates = collectDates([
+        { id: "sch-date", required: true, requiredMessage: t("schedule_date_required") },
+      ]);
+      if (!schDates.ok) return false;
 
-      const scheduledDate = new Date(`${dateVal}T${timeVal}:00`);
+      const [hh, mi] = timeVal.split(":").map(Number);
+      const scheduledDate = new Date(schDates.values["sch-date"]);
+      scheduledDate.setHours(hh || 0, mi || 0, 0, 0);
 
       // Serviser — iz liste ili ručni unos
       const providerSelect = document.getElementById("sch-provider");
@@ -206,6 +202,8 @@ export async function openScheduleForm(vehicle, options = {}) {
       if (onSuccess) onSuccess();
     }
   );
+
+  attachDateMask("sch-date");
 
   // Provider select — popuni polja kada se izabere serviser iz liste
   setTimeout(() => {

@@ -9,16 +9,19 @@ import {
   doc, addDoc, updateDoc, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
+import { todayDMY, datePlaceholder, attachDateMask, collectDates } from "./date-input.js";
 import { S, setActiveCompany, navigateTo, showToast, openModal } from "./app.js";
 import { getCompanies } from "./firebase.js";
 import { isVehicleRegistered, needsTachograph, openVehicleDetail, openServiceForm, fuelLevelScaleHTML, bindFuelLevelScale, fuelLevelLabel } from "./vehicles.js";
 import { mountPendingBanner } from "./pending-requests.js";
 import {
   effectiveServiceStatus, isServiceToday, isServiceOverdue, overdueDays, SERVICE_STATUS,
-  getServiceSettings, getRegularServiceInfo, timeLeftText, kmLeftText
+  getServiceSettings, getRegularServiceInfo, timeLeftText, kmLeftText, getTireSeasonReminder
 } from "./service-status.js";
 import { openIncidentForm } from "./incidents.js";
 import { tripEntryCard } from "./trips.js";
+import { scanQRCode, parseFiscalQR, fetchReceiptDetails, receiptWorkerConfigured } from "./receipt-scan.js";
+import { findReceiptDuplicate, saveTripEntry, DuplicateReceiptError, normalizeReceiptNo } from "./receipt-guard.js";
 
 // ── STANJE MODULA: aktivno zaduženje trenutnog vozača ─────────
 // Vozač može imati VIŠE aktivnih zaduženja istovremeno (npr. dva
@@ -297,6 +300,49 @@ async function loadDashboardData() {
       }
     }
 
+    // Podsetnici za zamenu sezonskih guma (samo administracija parka),
+    // mesec dana pre zakonskog roka — vidi getTireSeasonReminder().
+    // Podsetnik se ne prikazuje ako je zamena već zakazana / u toku,
+    // ako je u tekućem periodu već odrađen servis tipa "Gume", ili
+    // ako ga je admin odložio ("Podseti me kasnije").
+    const tireReminders = [];
+    if (role !== "driver") {
+      const toD = (x) => x?.toDate ? x.toDate() : (x ? new Date(x) : null);
+      const tireSvcByVehicle = new Map();
+      try {
+        const tireSnap = await getDocs(
+          query(collection(db, "companies", cid, "services"), where("serviceType", "==", "tires"))
+        );
+        tireSnap.docs.forEach(d => {
+          const sv = { id: d.id, ...d.data() };
+          if (!tireSvcByVehicle.has(sv.vehicleId)) tireSvcByVehicle.set(sv.vehicleId, []);
+          tireSvcByVehicle.get(sv.vehicleId).push(sv);
+        });
+      } catch (e) {
+        console.error("Tire services error:", e);
+      }
+      const nowTs = new Date();
+      activeVehicles.forEach(v => {
+        const r = getTireSeasonReminder(v);
+        if (!r) return;
+        if (v.tireReminderDisabled === true) return; // trajno isključeno (npr. vozilo koristi samo jednu sezonu)
+        const snoozedUntil = toD(v.tireReminderSnoozedUntil);
+        if (snoozedUntil && snoozedUntil > nowTs) return;
+        // početak perioda podsetnika = mesec dana pre roka
+        const windowStart = new Date(r.deadline.getFullYear(), r.deadline.getMonth() - 1, 1);
+        const handled = (tireSvcByVehicle.get(v.id) || []).some(sv => {
+          const st = effectiveServiceStatus(sv);
+          if (st === SERVICE_STATUS.PLANNED || st === SERVICE_STATUS.IN_PROGRESS) return true;
+          if (st === SERVICE_STATUS.DONE) { const d = toD(sv.serviceDate); return d && d >= windowStart; }
+          return false;
+        });
+        if (handled) return;
+        tireReminders.push({ ...r, vehicle: v });
+      });
+      // Najhitnije (najviše zakasnelo / najbliži rok) prvo
+      tireReminders.sort((a, b) => a.daysLeft - b.daysLeft);
+    }
+
     const isDriver = role === "driver";
 
     // Vozač: pronađi/otvori aktivnu vožnju za SVAKO aktivno zaduženje
@@ -312,7 +358,7 @@ async function loadDashboardData() {
 
     content.innerHTML = `
       ${isDriver ? renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSnap, vehicles, resolvedActiveTrips) : renderAdminDashboard({
-        total, active, inService, unregistered, broken, inactive, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount, serviceReminders
+        total, active, inService, unregistered, broken, inactive, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount, serviceReminders, tireReminders
       })}
     `;
 
@@ -327,7 +373,7 @@ async function loadDashboardData() {
   }
 }
 
-function renderAdminDashboard({ total, active, inService, unregistered, broken, inactive, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount, serviceReminders = [] }) {
+function renderAdminDashboard({ total, active, inService, unregistered, broken, inactive, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount, serviceReminders = [], tireReminders = [] }) {
   const today = new Date();
   today.setHours(0, 0, 0, 0); // lokalna ponoć
 
@@ -434,7 +480,33 @@ function renderAdminDashboard({ total, active, inService, unregistered, broken, 
               </div>
             </div>`;
         }).join("")}
-        ${(!upcomingScheduled || upcomingScheduled.length === 0) && serviceReminders.length > 0 ? "" : !upcomingScheduled || upcomingScheduled.length === 0
+        ${tireReminders.map(r => {
+          const v = r.vehicle;
+          const urgent = r.overdue || r.daysLeft <= 7;
+          const curType = v.tires?.type ? t("tire_" + v.tires.type) : "";
+          const dims = v.tires?.dimensions ? ` (${v.tires.dimensions})` : "";
+          return `
+            <div class="upcoming-item upcoming-item--${urgent ? "urgent" : "warning"} service-reminder tire-reminder" data-tire-vehicle="${v.id}">
+              <div class="service-reminder__body">
+                <div class="upcoming-item__main">
+                  <span class="upcoming-item__name">🛞 ${v.brand || ""} ${v.model || ""}</span>
+                  <span class="upcoming-item__plate">${v.plate || ""}</span>
+                  <span class="upcoming-item__kind">${t("tire_rem_title_" + r.needed)}</span>
+                </div>
+                <div class="service-reminder__info">
+                  ${t("tire_rem_current", { type: curType, dims })}<br>
+                  ${t("tire_rem_deadline", { date: formatDate(r.deadline) })}<br>
+                  <strong>📅 ${timeLeftText(r.daysLeft)}</strong>
+                </div>
+                <div class="service-reminder__question">${t("svc_rem_question")}</div>
+                <div class="service-reminder__actions">
+                  <button class="btn btn--primary btn--sm btn-tire-schedule" data-vehicle="${v.id}">${t("svc_rem_schedule_now")}</button>
+                  <button class="btn btn--secondary btn--sm btn-tire-snooze" data-vehicle="${v.id}">${t("svc_rem_snooze")}</button>
+                </div>
+              </div>
+            </div>`;
+        }).join("")}
+        ${(!upcomingScheduled || upcomingScheduled.length === 0) && (serviceReminders.length > 0 || tireReminders.length > 0) ? "" : !upcomingScheduled || upcomingScheduled.length === 0
           ? `<p class="empty-text">${t("schedule_no_data")}</p>`
           : upcomingScheduled.map(s => {
               const d = s.serviceDate?.toDate ? s.serviceDate.toDate() : new Date(s.serviceDate);
@@ -670,7 +742,7 @@ function renderActiveAssignmentBlock(a, trip, entries, v) {
     <div id="trip-entries-list-${a.id}">
       ${entries.length === 0
         ? `<div class="empty-state"><div class="empty-state__icon">📋</div><p>${t("trip_no_entries")}</p></div>`
-        : entries.map(e => tripEntryCard(e)).join("")
+        : entries.map(e => tripEntryCard(e, { clickable: true })).join("")
       }
     </div>
   `;
@@ -1128,6 +1200,8 @@ async function saveNewTrip() {
 function openFuelForm() {
   const bodyHTML = `
     <div class="form-section-title">${t("trip_fuel_header")}</div>
+    <button type="button" id="tf-scan-btn" class="btn btn--secondary btn--full">${t("receipt_scan_btn")}</button>
+    <p id="tf-scan-status" class="scan-status hidden"></p>
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">${t("trip_fuel_type")} *</label>
@@ -1152,7 +1226,7 @@ function openFuelForm() {
       <div class="form-group">
         <label class="form-label">${t("trip_fuel_price_per_l")}</label>
         <input id="tf-pricePerL" class="form-input" type="number" step="0.01" min="0"
-          placeholder="${t("trip_fuel_price_per_l_ph")}" readonly />
+          placeholder="${t("trip_fuel_price_per_l_ph")}" />
       </div>
     </div>
     <div class="form-row">
@@ -1163,6 +1237,16 @@ function openFuelForm() {
       <div class="form-group">
         <label class="form-label">${t("trip_fuel_receipt")}</label>
         <input id="tf-receiptNo" class="form-input" type="text" />
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">${t("trip_fuel_address")}</label>
+        <input id="tf-fuelStationAddress" class="form-input" type="text" placeholder="npr. Bulevar Heroja sa Košara 10, Beograd" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">${t("trip_fuel_receipt_time")}</label>
+        <input id="tf-receiptTime" class="form-input" type="datetime-local" step="1" />
       </div>
     </div>
     <div class="form-group">
@@ -1178,20 +1262,134 @@ function openFuelForm() {
     <p id="fuel-form-error" class="login-error hidden"></p>
   `;
 
+  fuelScan = { url: null, source: "manual", pib: null, object: null };
   openModal(t("trip_with_fueling"), bodyHTML, () => saveFuelEntry());
 
-  // Auto-izračun cene po litru
+  // Auto-izračun cene po litru (osim ako je cenu vozač upisao ručno)
   const calcPrice = () => {
+    const pEl = document.getElementById("tf-pricePerL");
+    if (!pEl || pEl.dataset.manual === "1") return;
     const amount = parseFloat(document.getElementById("tf-fuelAmount")?.value);
     const cost   = parseFloat(document.getElementById("tf-fuelCost")?.value);
-    if (amount > 0 && cost > 0) {
-      document.getElementById("tf-pricePerL").value = (cost / amount).toFixed(2);
-    }
+    if (amount > 0 && cost > 0) pEl.value = (cost / amount).toFixed(2);
   };
   setTimeout(() => {
     document.getElementById("tf-fuelAmount")?.addEventListener("input", calcPrice);
     document.getElementById("tf-fuelCost")?.addEventListener("input", calcPrice);
+    document.getElementById("tf-pricePerL")?.addEventListener("input", (e) => {
+      e.target.dataset.manual = e.target.value ? "1" : "";
+    });
+    document.getElementById("tf-scan-btn")?.addEventListener("click", onScanReceipt);
   }, 100);
+}
+
+// ── SKENIRANJE FISKALNOG RAČUNA ───────────────────────────────
+// Stanje poslednjeg skeniranja (čuva se uz unos goriva)
+let fuelScan = { url: null, source: "manual", pib: null, object: null };
+
+// Poruka "Račun X je već unet (datum, vozač, vozilo)"
+function duplicateReceiptMessage(pfr, existing) {
+  const when = existing?.createdAt ? formatDateDMY(existing.createdAt) : "—";
+  const who  = [existing?.driverName, existing?.vehiclePlate].filter(Boolean).join(", ") || "—";
+  return t("receipt_duplicate_detail", { pfr, date: when, who });
+}
+
+// Proverava da li je račun već unet (gorivo ILI trošak). Vraća
+//   { duplicate: unos } | { duplicate: null } | { error: poruka }
+// Ako provera ne uspe, snimanje se NE dozvoljava (ranije je tiho prolazilo).
+async function checkReceiptDuplicate(pfr) {
+  if (!normalizeReceiptNo(pfr)) return { duplicate: null };
+  try {
+    return { duplicate: await findReceiptDuplicate(S.companyId, pfr) };
+  } catch (e) {
+    console.warn("Provera duplikata računa nije uspela:", e);
+    return { error: t("receipt_check_failed") };
+  }
+}
+
+function fuelFormSet(id, value) {
+  const el = document.getElementById(id);
+  if (!el || value === null || value === undefined || value === "") return;
+  if (el.tagName === "SELECT" && ![...el.options].some((o) => o.value === String(value))) return;
+  el.value = value;
+}
+
+async function onScanReceipt() {
+  const statusEl = document.getElementById("tf-scan-status");
+  const btn = document.getElementById("tf-scan-btn");
+  const setStatus = (msg, kind = "info") => {
+    if (!statusEl) return;
+    statusEl.textContent = msg;
+    statusEl.className = `scan-status scan-status--${kind}`;
+  };
+
+  let text;
+  try {
+    text = await scanQRCode();
+  } catch (e) {
+    setStatus(t(e.code === "denied" ? "receipt_scan_camera_denied" : "receipt_scan_camera_unavailable"), "error");
+    return;
+  }
+  if (text === null) return; // korisnik je zatvorio skener
+
+  const qr = parseFiscalQR(text);
+  if (!qr) { setStatus(t("receipt_scan_not_fiscal"), "error"); return; }
+  const dup = await checkReceiptDuplicate(qr.pfr);
+  if (dup.error) { setStatus(dup.error, "error"); return; }
+  if (dup.duplicate) {
+    setStatus(duplicateReceiptMessage(qr.pfr, dup.duplicate), "error");
+    return;
+  }
+
+  // Podaci koji stoje u samom QR kodu
+  fuelScan.url = text.trim();
+  fuelScan.source = "qr";
+  fuelFormSet("tf-receiptNo", qr.pfr);
+  fuelFormSet("tf-fuelCost", qr.amount);
+  fuelFormSet("tf-receiptTime", qr.dateTime);
+  document.getElementById("tf-fuelCost")?.dispatchEvent(new Event("input"));
+
+  if (!receiptWorkerConfigured()) { setStatus(t("receipt_scan_qr_only"), "warn"); return; }
+
+  // Pumpa, adresa, gorivo, litri i cena — sa računa preko Worker-a
+  setStatus(t("receipt_scan_loading"), "info");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetchReceiptDetails(fuelScan.url);
+    applyReceiptDetails(r, qr, setStatus);
+  } catch (e) {
+    console.warn("Učitavanje računa nije uspelo:", e.message, e.diag || "");
+    setStatus(`${t("receipt_scan_qr_only")} (${e.message})`, "warn");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function applyReceiptDetails(r, qr, setStatus) {
+  const items = r.items || [];
+  const fuelItem = items.find((i) => i.fuelType) || (items.length === 1 ? items[0] : null);
+
+  fuelFormSet("tf-fuelStation", r.chain);
+  fuelFormSet("tf-fuelStationAddress", [r.address, r.city].filter(Boolean).join(", "));
+  fuelFormSet("tf-receiptTime", r.time);
+  fuelScan.pib = r.pib || null;
+  fuelScan.object = r.object || null;
+
+  if (fuelItem) {
+    fuelFormSet("tf-fuelType", fuelItem.fuelType);
+    fuelFormSet("tf-fuelAmount", fuelItem.quantity);
+    if (fuelItem.total > 0) fuelFormSet("tf-fuelCost", fuelItem.total);
+    const pEl = document.getElementById("tf-pricePerL");
+    if (pEl && fuelItem.unitPrice > 0) { pEl.value = fuelItem.unitPrice.toFixed(2); pEl.dataset.manual = ""; }
+  }
+
+  const notes = [];
+  if (r.total > 0 && Math.abs(r.total - qr.amount) > 0.01) {
+    notes.push(t("receipt_scan_total_mismatch", { a: r.total.toFixed(2), b: qr.amount.toFixed(2) }));
+  }
+  if (!fuelItem) notes.push(t("receipt_scan_no_fuel_item"));
+  else if (items.length > 1) notes.push(t("receipt_scan_extra_items", { total: (r.total || qr.amount).toFixed(2) }));
+  setStatus(notes.length ? notes.join(" ") : t("receipt_scan_ok"), notes.length ? "warn" : "ok");
 }
 
 async function saveFuelEntry() {
@@ -1201,14 +1399,24 @@ async function saveFuelEntry() {
 
   if (!fuelAmount || !fuelCost || !fuelStation) {
     showEntryError("fuel-form-error", t("required_field"));
-    return;
+    return false;
   }
 
   const currentKm = validateKmInput(document.getElementById("tf-currentKm")?.value, "fuel-form-error");
-  if (currentKm === null) return;
+  if (currentKm === null) return false;
+
+  const receiptNo = normalizeReceiptNo(document.getElementById("tf-receiptNo")?.value);
+  if (receiptNo) {
+    const dup = await checkReceiptDuplicate(receiptNo);
+    if (dup.error || dup.duplicate) {
+      showEntryError("fuel-form-error", dup.error || duplicateReceiptMessage(receiptNo, dup.duplicate));
+      return false;
+    }
+  }
+  const priceField = parseFloat(document.getElementById("tf-pricePerL")?.value);
 
   try {
-    await addDoc(collection(db, "companies", S.companyId, "tripEntries"), {
+    await saveTripEntry(S.companyId, {
       type:         "fuel",
       assignmentId: activeAssignment.id,
       tripId:       activeTrip?.id || null,
@@ -1220,9 +1428,15 @@ async function saveFuelEntry() {
       fuelType:     document.getElementById("tf-fuelType")?.value,
       fuelAmount,
       fuelCost,
-      pricePerL:    fuelAmount > 0 ? fuelCost / fuelAmount : null,
+      pricePerL:    priceField > 0 ? priceField : (fuelAmount > 0 ? fuelCost / fuelAmount : null),
       fuelStation,
-      receiptNo:    document.getElementById("tf-receiptNo")?.value.trim() || null,
+      fuelStationAddress: document.getElementById("tf-fuelStationAddress")?.value.trim() || null,
+      stationObject: fuelScan.object || null,
+      stationPib:   fuelScan.pib || null,
+      receiptNo,
+      receiptTime:  document.getElementById("tf-receiptTime")?.value || null,
+      receiptUrl:   fuelScan.url || null,
+      receiptSource: fuelScan.source,
       currentKm,
       notes:        document.getElementById("tf-notes")?.value.trim() || null,
       createdAt:    serverTimestamp(),
@@ -1233,7 +1447,10 @@ async function saveFuelEntry() {
     showToast(t("success"), "success");
     await refreshEntries();
   } catch (e) {
-    showEntryError("fuel-form-error", `${t("error")}: ${e.message}`);
+    showEntryError("fuel-form-error", e instanceof DuplicateReceiptError
+      ? duplicateReceiptMessage(e.receiptNo, e.existing)
+      : `${t("error")}: ${e.message}`);
+    return false;
   }
 }
 
@@ -1290,8 +1507,17 @@ async function saveCostEntry() {
   const currentKm = validateKmInput(document.getElementById("tc-currentKm")?.value, "cost-form-error");
   if (currentKm === null) return;
 
+  const costReceiptNo = normalizeReceiptNo(document.getElementById("tc-receiptNo")?.value);
+  if (costReceiptNo) {
+    const dup = await checkReceiptDuplicate(costReceiptNo);
+    if (dup.error || dup.duplicate) {
+      showEntryError("cost-form-error", dup.error || duplicateReceiptMessage(costReceiptNo, dup.duplicate));
+      return false;
+    }
+  }
+
   try {
-    await addDoc(collection(db, "companies", S.companyId, "tripEntries"), {
+    await saveTripEntry(S.companyId, {
       type:         document.getElementById("tc-type")?.value || "other_cost",
       assignmentId: activeAssignment.id,
       tripId:       activeTrip?.id || null,
@@ -1301,7 +1527,7 @@ async function saveCostEntry() {
       driverUid:    S.user.uid,
       driverName:   activeAssignment.driverName,
       amount,
-      receiptNo:    document.getElementById("tc-receiptNo")?.value.trim() || null,
+      receiptNo:    costReceiptNo,
       location:     document.getElementById("tc-location")?.value.trim() || null,
       currentKm,
       notes:        document.getElementById("tc-notes")?.value.trim() || null,
@@ -1313,7 +1539,10 @@ async function saveCostEntry() {
     showToast(t("success"), "success");
     await refreshEntries();
   } catch (e) {
-    showEntryError("cost-form-error", `${t("error")}: ${e.message}`);
+    showEntryError("cost-form-error", e instanceof DuplicateReceiptError
+      ? duplicateReceiptMessage(e.receiptNo, e.existing)
+      : `${t("error")}: ${e.message}`);
+    return false;
   }
 }
 
@@ -1356,29 +1585,27 @@ function openDriverUnassignForm() {
 }
 
 async function processDriverUnassign() {
-  const endDate   = document.getElementById("du-endDate")?.value;
   const endKm     = parseFloat(document.getElementById("du-endKm")?.value);
   const notes     = document.getElementById("du-notes")?.value.trim();
   const fuelLevel = document.getElementById("du-fuelLevel")?.value || null;
 
-  if (!endDate) {
-    showEntryError("unassign-form-error", t("assignment_unassign_date_required"));
-    return;
-  }
-  const endDateObj = parseDMY(endDate);
-  if (!endDateObj) {
-    showEntryError("unassign-form-error", t("assignment_unassign_date_required"));
-    return;
-  }
+  // Datum: poruka ispod polja + fokus. `return false` drži dijalog otvorenim
+  // (običan `return` ga je zatvarao i korisnik je gubio unos).
+  const unassignDates = collectDates([
+    { id: "du-endDate", required: true, requiredMessage: t("assignment_unassign_date_required") },
+  ]);
+  if (!unassignDates.ok) return false;
+  const endDateObj = unassignDates.values["du-endDate"];
+
   if (!endKm || endKm <= 0) {
     showEntryError("unassign-form-error", t("assignment_unassign_endkm_required"));
-    return;
+    return false;
   }
 
   const lastKm = getLastKnownKm();
   if (endKm < lastKm) {
     showEntryError("unassign-form-error", `${t("trip_km_too_low")}: ${lastKm.toLocaleString()} km`);
-    return;
+    return false;
   }
 
   try {
@@ -1458,7 +1685,7 @@ async function refreshEntries() {
   if (listEl) {
     listEl.innerHTML = tripEntries.length === 0
       ? `<div class="empty-state"><div class="empty-state__icon">📋</div><p>${t("trip_no_entries")}</p></div>`
-      : tripEntries.map(e => tripEntryCard(e)).join("");
+      : tripEntries.map(e => tripEntryCard(e, { clickable: true })).join("");
   }
 
   // Ažuriraj statistike (samo za blok ovog zaduženja)
@@ -1484,45 +1711,6 @@ async function refreshEntries() {
 function showEntryError(id, msg) {
   const el = document.getElementById(id);
   if (el) { el.textContent = msg; el.classList.remove("hidden"); }
-}
-
-// ── DATUMI: prikaz i unos u lokalnom formatu dd/mm/yyyy ──────
-// <input type="date"> prikazuje kalendar u formatu koji zavisi od
-// jezika/regije podešene u browseru korisnika, ne od jezika aplikacije,
-// pa koristimo tekstualno polje sa maskom umesto toga.
-function todayDMY() {
-  const d = new Date();
-  const dd = String(d.getDate()).padStart(2, "0");
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${dd}.${mm}.${d.getFullYear()}`;
-}
-
-// Placeholder prati jezik aplikacije (dd/mm ostaje fiksno — poslovno
-// pravilo firme — menja se samo naziv za "godinu": yyyy (en) / gggg (sr)).
-function datePlaceholder() {
-  return getCurrentLang() === "en" ? "dd.mm.yyyy" : "dd.mm.gggg";
-}
-
-function parseDMY(str) {
-  if (!str) return null;
-  const m = String(str).trim().match(/^(\d{1,2})[./](\d{1,2})[./](\d{4})\.?$/);
-  if (!m) return null;
-  const day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
-  const d = new Date(year, month - 1, day);
-  if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return null;
-  return d;
-}
-
-function attachDateMask(id) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.addEventListener("input", () => {
-    const digits = el.value.replace(/\D/g, "").slice(0, 8);
-    let out = digits;
-    if (digits.length > 4) out = `${digits.slice(0, 2)}.${digits.slice(2, 4)}.${digits.slice(4)}`;
-    else if (digits.length > 2) out = `${digits.slice(0, 2)}.${digits.slice(2)}`;
-    el.value = out;
-  });
 }
 
 function attachDashboardEvents() {
@@ -1558,37 +1746,103 @@ function attachDashboardEvents() {
     });
   });
 
-  // Podsetnik za redovni servis: "Podseti me kasnije" → odloži za 1 dan
+  // Podsetnik za redovni servis: "Podseti me kasnije" → pitanje za koliko dana odložiti
   document.querySelectorAll(".btn-reminder-snooze").forEach(btn => {
-    btn.addEventListener("click", async (e) => {
+    btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const vehicleId = btn.dataset.vehicle;
-      try {
-        const until = new Date(Date.now() + 24 * 60 * 60 * 1000);
-        await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId), {
-          serviceReminderSnoozedUntil: until,
-        });
-        const v = dashboardVehicles.find(x => x.id === vehicleId);
-        if (v) v.serviceReminderSnoozedUntil = until;
-        showToast(t("svc_rem_snoozed_toast"), "success");
-        loadDashboardData();
-      } catch (err) {
-        showToast(`${t("error")}: ${err.message}`, "error");
-      }
+      openSnoozeModal({
+        permanent: false,
+        onPick: async (days) => {
+          const until = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+          await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId), {
+            serviceReminderSnoozedUntil: until,
+          });
+          const v = dashboardVehicles.find(x => x.id === vehicleId);
+          if (v) v.serviceReminderSnoozedUntil = until;
+          showToast(t("svc_rem_snoozed_toast", { n: days }), "success");
+        },
+      });
     });
   });
 
-  // Klik na zakazani servis u panelu → detalji vozila, tab "Servisna istorija"
+  // Podsetnik za gume: "Zakaži sada" → forma za servis tipa "Gume"
+  document.querySelectorAll(".btn-tire-schedule").forEach(btn => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const vehicle = dashboardVehicles.find(v => v.id === btn.dataset.vehicle);
+      if (!vehicle) return;
+      await openServiceForm(vehicle, null, { serviceType: "tires" }, {
+        onSaved: () => loadDashboardData(),
+      });
+    });
+  });
+
+  // Podsetnik za gume: "Podseti me kasnije" → za koliko dana, ili trajno
+  document.querySelectorAll(".btn-tire-snooze").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const vehicleId = btn.dataset.vehicle;
+      openSnoozeModal({
+        permanent: true,
+        onPick: async (days) => {
+          const ref = doc(db, "companies", S.companyId, "vehicles", vehicleId);
+          const v = dashboardVehicles.find(x => x.id === vehicleId);
+          if (days === "forever") {
+            await updateDoc(ref, { tireReminderDisabled: true });
+            if (v) v.tireReminderDisabled = true;
+            showToast(t("tire_snoozed_forever_toast"), "success");
+          } else {
+            const until = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+            await updateDoc(ref, { tireReminderSnoozedUntil: until });
+            if (v) v.tireReminderSnoozedUntil = until;
+            showToast(t("tire_snoozed_toast", { n: days }), "success");
+          }
+        },
+      });
+    });
+  });
+
+  // Klik na nadolazeći servis u panelu → detalji vozila, tab "Servisna istorija"
+  // (za podsetnik o gumama: tab "Bezbednost", gde se vide pneumatici)
   document.querySelectorAll("[data-vehicle-id]").forEach(item => {
     item.addEventListener("click", () => {
       const vehicleId = item.dataset.vehicleId;
       if (!vehicleId) return;
+      const vehicleTab = item.dataset.vehicleTab || "service";
       S.activeTab = "vehicles";
       document.querySelectorAll(".nav-btn").forEach(btn => {
         btn.classList.toggle("nav-btn--active", btn.dataset.tab === "vehicles");
       });
-      openVehicleDetail(vehicleId, "service");
+      openVehicleDetail(vehicleId, vehicleTab, null, () => navigateTo("dashboard"));
     });
+  });
+}
+
+// Zajednički prozor "Podseti me kasnije": pita za koliko dana odložiti
+// (opciono i "Trajno"). onPick(days | "forever") snima odluku.
+function openSnoozeModal({ permanent = false, onPick }) {
+  const opts = [1, 3, 7, 14];
+  openModal(t("svc_rem_snooze"), `
+    <div class="form-group">
+      <label class="form-label">${t("tire_snooze_question")}</label>
+      <select id="snooze-days" class="form-select">
+        ${opts.map(n => `<option value="${n}" ${n === 3 ? "selected" : ""}>${t("tire_snooze_opt_" + n)}</option>`).join("")}
+        ${permanent ? `<option value="forever">${t("tire_snooze_opt_forever")}</option>` : ""}
+      </select>
+      ${permanent ? `<div class="form-hint">${t("tire_snooze_forever_hint")}</div>` : ""}
+    </div>
+  `, async () => {
+    const raw = document.getElementById("snooze-days")?.value;
+    const pick = raw === "forever" ? "forever" : (parseInt(raw, 10) || 1);
+    try {
+      await onPick(pick);
+      loadDashboardData();
+      return true;
+    } catch (err) {
+      showToast(`${t("error")}: ${err.message}`, "error");
+      return false;
+    }
   });
 }
 

@@ -77,6 +77,14 @@ export async function renderIncidents(container) {
   // Vozač može da doda prijavu i odavde
   document.getElementById("btn-add-incident")?.addEventListener("click", () => openIncidentForm());
 
+  // UI mora da prikaže zapamćene filtere/pretragu (npr. posle povratka iz detalja)
+  document.querySelectorAll("[data-itype]").forEach(c =>
+    c.classList.toggle("chip--active", c.dataset.itype === filterType));
+  document.querySelectorAll("[data-istatus]").forEach(c =>
+    c.classList.toggle("chip--active", c.dataset.istatus === filterStatus));
+  const incidentSearchEl = document.getElementById("incident-search");
+  if (incidentSearchEl) incidentSearchEl.value = searchTerm;
+
   document.getElementById("incident-search")?.addEventListener("input", (e) => {
     searchTerm = e.target.value.toLowerCase();
     renderList();

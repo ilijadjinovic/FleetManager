@@ -11,7 +11,11 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
 import { S, showToast } from "./app.js";
-import { isVehicleRegistered } from "./vehicles.js";
+import { isVehicleRegistered, requiredEquipmentFor } from "./vehicles.js";
+import { effectiveServiceStatus, SERVICE_STATUS } from "./service-status.js";
+import {
+  toDMY, datePlaceholder, attachDateMask, collectDates, setDateError
+} from "./date-input.js";
 import { DEJAVU_SANS_REGULAR_B64, DEJAVU_SANS_BOLD_B64 } from "./fonts-dejavu.js";
 
 // ── FONT ZA SRPSKA SLOVA (š đ č ć ž) ───────────────────────────
@@ -86,12 +90,12 @@ export async function renderReports(container) {
         <div class="form-group">
           <label class="form-label">${t("report_date_from")}</label>
           <input id="rep-from" class="form-input" type="text" inputmode="numeric" maxlength="10"
-            placeholder="${datePlaceholder()}" value="${toDMY(firstDayOfMonth())}" />
+            placeholder="${datePlaceholder()}" value="${toDMY(defaultPeriodFrom())}" />
         </div>
         <div class="form-group">
           <label class="form-label">${t("report_date_to")}</label>
           <input id="rep-to" class="form-input" type="text" inputmode="numeric" maxlength="10"
-            placeholder="${datePlaceholder()}" value="${toDMY(today())}" />
+            placeholder="${datePlaceholder()}" value="${toDMY(new Date())}" />
         </div>
       </div>
     </div>
@@ -269,10 +273,9 @@ async function generateVehicleReport(allVehicles) {
   const selectedIds = [...document.querySelectorAll(".chk-vehicle:checked")].map(c => c.value);
   if (selectedIds.length === 0) { showToast(t("report_select_vehicle_required"), "warning"); return; }
 
-  const from = parseDMY(document.getElementById("rep-from")?.value);
-  const to   = parseDMY(document.getElementById("rep-to")?.value);
-  if (!from || !to) { showToast(t("required_field"), "warning"); return; }
-  to.setHours(23, 59, 59);
+  const period = readReportPeriod();
+  if (!period) return;
+  const { from, to } = period;
 
   setStatus(t("loading"));
 
@@ -310,6 +313,7 @@ async function generateVehicleReport(allVehicles) {
 
       let y = drawHeader(pdf, company, from, to);
       y = drawVehicleSection(pdf, vehicle, y);
+      y = drawEquipmentSection(pdf, vehicle, y);
       y = drawAssignmentsSection(pdf, assignments, y);
       y = drawServicesSection(pdf, services, y);
       y = drawFuelingsSection(pdf, fuelings, y);
@@ -491,10 +495,9 @@ async function generateDriverReport(allDrivers) {
   const selectedIds = [...document.querySelectorAll(".chk-driver:checked")].map(c => c.value);
   if (selectedIds.length === 0) { showToast(t("report_select_driver_required"), "warning"); return; }
 
-  const from = parseDMY(document.getElementById("rep-from")?.value);
-  const to   = parseDMY(document.getElementById("rep-to")?.value);
-  if (!from || !to) { showToast(t("required_field"), "warning"); return; }
-  to.setHours(23, 59, 59);
+  const period = readReportPeriod();
+  if (!period) return;
+  const { from, to } = period;
 
   setStatus(t("loading"));
 
@@ -511,16 +514,14 @@ async function generateDriverReport(allDrivers) {
       if (!firstPage) pdf.addPage();
       firstPage = false;
 
+      // Zapisi su istorijski mešoviti: neki imaju popunjen samo driverId, neki
+      // samo driverUid (npr. kad profil korisnika nema driverId). Zato se traži
+      // po OBA polja i rezultati se spajaju bez duplikata — isto kao u
+      // trips.js (loadDriverAssignmentHistory) i na tabu vozača.
       const [assignments, entries, incidents] = await Promise.all([
-        getDocsInPeriod("assignments", "startDate", from, to, [
-          where("driverId", "==", driver.id)
-        ]),
-        getDocsInPeriod("tripEntries", "createdAt", from, to, [
-          where("driverId", "==", driver.id)
-        ]),
-        getDocsInPeriod("incidents", "createdAt", from, to, [
-          where("driverId", "==", driver.id)
-        ]),
+        getDriverDocsInPeriod("assignments", "startDate", from, to, driver),
+        getDriverDocsInPeriod("tripEntries", "createdAt", from, to, driver),
+        getDriverDocsInPeriod("incidents",   "createdAt", from, to, driver),
       ]);
 
       const fuelings = entries.filter(e => e.type === "fuel");
@@ -764,12 +765,58 @@ function drawVehicleSection(pdf, v, y) {
   y = drawRow(pdf, t("vehicle_fuel_type"),         v.fuelType ? t("fuel_" + v.fuelType) : null, y, true);
   y = drawRow(pdf, t("vehicle_seats"),             v.seats,        y);
   y = drawRow(pdf, t("vehicle_payload"),           v.payload ? `${v.payload} kg` : null, y, true);
-  y = drawRow(pdf, t("vehicle_current_km"),        v.currentKm ? `${v.currentKm.toLocaleString()} km` : null, y);
+  y = drawRow(pdf, t("vehicle_current_km"),        v.currentKm
+    ? `${v.currentKm.toLocaleString()} km` + (v.currentKmUpdatedAt ? `  (${t("report_pdf_km_entry_date")}: ${formatDateSr(v.currentKmUpdatedAt)})` : "")
+    : null, y);
   y = drawRow(pdf, t("vehicle_reg_expiry"),        formatDateSr(v.regExpiry),  y, true);
   y = drawRow(pdf, t("vehicle_insurance_expiry"),  formatDateSr(v.insuranceExpiry), y);
   y = drawRow(pdf, t("report_pdf_insurance_policy_label"), v.insuranceCompany ? `${v.insuranceCompany} / ${v.insurancePolicy || "—"}` : null, y, true);
   y = drawRow(pdf, t("vehicle_purchase_value"),    v.purchaseValue ? `${Number(v.purchaseValue).toLocaleString()} RSD` : null, y);
+  y = drawRow(pdf, t("vehicle_tires_type"),        v.tires?.type ? t("tire_" + v.tires.type) : null, y, true);
+  y = drawRow(pdf, t("vehicle_tires_dimensions"),  v.tires?.dimensions, y);
   return y + 4;
+}
+
+// Oprema (tab Bezbednost): samo stavke obavezne za kategoriju vozila,
+// sa oznakom šta vozilo ima, a šta nedostaje.
+function drawEquipmentSection(pdf, v, y) {
+  const required = requiredEquipmentFor(v.category);
+  const owned = v.requiredEquipment || [];
+  const missing = required.filter(eq => !owned.includes(eq));
+  const catLabel = v.category ? ` — ${t("vehicle_category_" + v.category)}` : "";
+
+  y = drawSectionTitle(pdf, `${t("report_pdf_section_equipment")}${catLabel}`, y, 15);
+  required.forEach((eq, i) => {
+    const has = owned.includes(eq);
+    y = checkPageBreak(pdf, y, 7);
+    if (i % 2 === 0) {
+      pdf.setFillColor(248, 250, 255);
+      pdf.rect(M, y - 3, PW, 6, "F");
+    }
+    pdf.setFont(REPORT_FONT, "bold");
+    pdf.setFontSize(8.5);
+    pdf.setTextColor(80);
+    pdf.text(t("equipment_" + eq), M + 2, y);
+    if (has) pdf.setTextColor(22, 163, 74); else pdf.setTextColor(220, 38, 38);
+    pdf.text(has ? t("yes") : t("no"), M + 65, y);
+    y += 6;
+  });
+
+  y += 1;
+  y = checkPageBreak(pdf, y, 7);
+  pdf.setFont(REPORT_FONT, "bold");
+  pdf.setFontSize(8.5);
+  if (missing.length === 0) {
+    pdf.setTextColor(22, 163, 74);
+    pdf.text(t("report_pdf_equipment_complete"), M + 2, y);
+  } else {
+    pdf.setTextColor(220, 38, 38);
+    const lines = pdf.splitTextToSize(
+      `${t("report_pdf_equipment_missing")}: ${missing.map(eq => t("equipment_" + eq)).join(", ")}`, PW - 4);
+    lines.forEach(line => { y = checkPageBreak(pdf, y, 6); pdf.text(line, M + 2, y); y += 4.5; });
+    y -= 4.5;
+  }
+  return y + 8;
 }
 
 function drawAssignmentsSection(pdf, assignments, y) {
@@ -814,6 +861,18 @@ function drawAssignmentsSection(pdf, assignments, y) {
   return y + 2;
 }
 
+function isServiceDone(srv) {
+  return effectiveServiceStatus(srv) === SERVICE_STATUS.DONE;
+}
+
+// Kolona "Trošak": za završen servis iznos, za ostale (planiran, u servisu,
+// otkazan) naziv statusa — da se vidi zašto iznos nije u ukupnom zbiru.
+function serviceCostCell(srv) {
+  const status = effectiveServiceStatus(srv);
+  if (status !== SERVICE_STATUS.DONE) return t("service_status_" + status);
+  return srv.cost ? Number(srv.cost).toLocaleString() + " RSD" : "—";
+}
+
 function drawServicesSection(pdf, services, y) {
   y = drawSectionTitle(pdf, `${t("report_pdf_section_services")} (${services.length})`, y, 15);
   if (services.length === 0) { return drawEmptyRow(pdf, y); }
@@ -832,7 +891,7 @@ function drawServicesSection(pdf, services, y) {
       t("service_type_" + s.serviceType) || s.serviceType,
       formatDateSr(s.serviceDate),
       s.km ? s.km.toLocaleString() : "—",
-      s.cost ? s.cost.toLocaleString() + " RSD" : "—",
+      serviceCostCell(s),
       s.workshop || "—",
     ], y, i % 2 === 0);
 
@@ -846,7 +905,10 @@ function drawServicesSection(pdf, services, y) {
     }
   });
 
-  const totalCost = services.reduce((s, srv) => s + (srv.cost || 0), 0);
+  // U zbir ulaze samo ZAVRŠENI servisi — planirani i otkazani nisu trošak.
+  const totalCost = services
+    .filter(isServiceDone)
+    .reduce((s, srv) => s + (Number(srv.cost) || 0), 0);
   if (totalCost > 0) {
     y += 2;
     pdf.setFont(REPORT_FONT, "bold");
@@ -902,8 +964,8 @@ function drawFuelingsSection(pdf, fuelings, y) {
 }
 
 function drawCostsSection(pdf, costs, y) {
-  if (costs.length === 0) return y;
   y = drawSectionTitle(pdf, `${t("report_pdf_section_costs")} (${costs.length})`, y, 15);
+  if (costs.length === 0) { return drawEmptyRow(pdf, y); }
 
   const cols = [
     [t("report_pdf_col_date"),           25],
@@ -938,8 +1000,8 @@ function drawCostsSection(pdf, costs, y) {
 }
 
 function drawIncidentsSection(pdf, incidents, y) {
-  if (incidents.length === 0) return y;
   y = drawSectionTitle(pdf, `${t("report_pdf_section_incidents")} (${incidents.length})`, y, 25);
+  if (incidents.length === 0) { return drawEmptyRow(pdf, y); }
 
   incidents.forEach((inc, i) => {
     y = checkPageBreak(pdf, y, 25);
@@ -1091,6 +1153,29 @@ async function getDocsInPeriod(subcollection, dateField, from, to, extraWhere = 
   }
 }
 
+// Dokumenti vozača u periodu: upit po driverId + (ako vozač ima lokalni nalog)
+// upit po driverUid; spajanje bez duplikata po id-ju, sortirano po datumu.
+async function getDriverDocsInPeriod(subcollection, dateField, from, to, driver) {
+  const jobs = [
+    getDocsInPeriod(subcollection, dateField, from, to, [where("driverId", "==", driver.id)]),
+  ];
+  if (driver.localAuthUid) {
+    jobs.push(
+      getDocsInPeriod(subcollection, dateField, from, to, [where("driverUid", "==", driver.localAuthUid)])
+    );
+  }
+  const merged = new Map();
+  (await Promise.all(jobs)).flat().forEach(d => merged.set(d.id, d));
+  return [...merged.values()].sort((a, b) => toMillis(a[dateField]) - toMillis(b[dateField]));
+}
+
+function toMillis(val) {
+  if (!val) return 0;
+  if (val.toMillis) return val.toMillis();
+  const d = new Date(val);
+  return isNaN(d) ? 0 : d.getTime();
+}
+
 // ── UTILS ─────────────────────────────────────────────────────
 function setStatus(msg) {
   const el = document.getElementById("report-status");
@@ -1105,55 +1190,42 @@ function formatDateSr(val) {
 }
 
 function formatDateFile(date) {
-  return date.toISOString().split("T")[0];
+  // Lokalni datum (toISOString bi oko ponoći dao UTC datum, tj. pogrešan dan)
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${mm}-${dd}`;
 }
 
-function firstDayOfMonth() {
+// Podrazumevani period izveštaja: poslednjih 30 dana (do danas).
+// Ranije je podrazumevano bio "od 1. u mesecu", pa je prvog dana u mesecu
+// izveštaj izgledao prazan iako postoje unosi iz prethodnog meseca.
+function defaultPeriodFrom() {
   const d = new Date();
-  return new Date(d.getFullYear(), d.getMonth(), 1).toISOString().split("T")[0];
-}
-
-function today() {
-  return new Date().toISOString().split("T")[0];
-}
-
-// Placeholder prati jezik aplikacije (dd/mm ostaje fiksno — poslovno
-// pravilo firme — menja se samo naziv za "godinu": yyyy (en) / gggg (sr)).
-function datePlaceholder() {
-  return getCurrentLang() === "en" ? "dd.mm.yyyy" : "dd.mm.gggg";
-}
-
-// ── DATUMI: prikaz i unos u lokalnom formatu dd/mm/yyyy ──────
-// <input type="date"> prikazuje kalendar u formatu koji zavisi od
-// jezika/regije podešene u browseru korisnika, ne od jezika aplikacije,
-// pa koristimo tekstualno polje sa maskom umesto toga.
-function toDMY(val) {
-  if (!val) return "";
-  const d = val.toDate ? val.toDate() : new Date(val);
-  if (isNaN(d)) return "";
-  const dd = String(d.getDate()).padStart(2, "0");
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${dd}.${mm}.${d.getFullYear()}`;
-}
-
-function parseDMY(str) {
-  if (!str) return null;
-  const m = String(str).trim().match(/^(\d{1,2})[./](\d{1,2})[./](\d{4})\.?$/);
-  if (!m) return null;
-  const day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
-  const d = new Date(year, month - 1, day);
-  if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return null;
+  d.setDate(d.getDate() - 30);
   return d;
 }
 
-function attachDateMask(id) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.addEventListener("input", () => {
-    const digits = el.value.replace(/\D/g, "").slice(0, 8);
-    let out = digits;
-    if (digits.length > 4) out = `${digits.slice(0, 2)}.${digits.slice(2, 4)}.${digits.slice(4)}`;
-    else if (digits.length > 2) out = `${digits.slice(0, 2)}.${digits.slice(2)}`;
-    el.value = out;
-  });
+// Čita i proverava polja "Od" / "Do". Pri grešci prikazuje poruku ISPOD
+// pogrešnog polja, stavlja fokus na njega i vraća null.
+function readReportPeriod() {
+  const res = collectDates([
+    { id: "rep-from", required: true },
+    { id: "rep-to",   required: true },
+  ]);
+  if (!res.ok) {
+    showToast(res.firstMessage, "warning");
+    return null;
+  }
+
+  const from = res.values["rep-from"];
+  const to   = res.values["rep-to"];
+  if (from > to) {
+    const msg = t("date_err_range_to_before_from");
+    setDateError("rep-to", msg, { focus: true });
+    showToast(msg, "warning");
+    return null;
+  }
+
+  to.setHours(23, 59, 59, 999);
+  return { from, to };
 }

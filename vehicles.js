@@ -10,6 +10,10 @@ import {
   where
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
+import {
+  toDMY, todayDMY, parseDMY, datePlaceholder, attachDateMask,
+  collectDates, setDateError
+} from "./date-input.js";
 import { S, showToast, openModal, closeModal } from "./app.js";
 import { getServiceProviders } from "./servicers.js";
 import {
@@ -18,6 +22,13 @@ import {
   cleanVehicleServiceOverrides
 } from "./service-status.js";
 import { incidentCard, scheduleServiceForIncident } from "./incidents.js";
+import { detailButton, isAdminViewer } from "./entry-details.js";
+import { rememberEntry } from "./detail-registry.js";
+import { esc as escDet, fmtNum as fmtNumDet, fmtRsd as fmtRsdDet, toMillis as toMsDet } from "./entries-view.js";
+import {
+  loadVehicleAssignmentHistory, groupAssignmentsByDriver, summarizeAssignments,
+  historyAssignmentCard, historyEntryItem, attachAssignmentHistoryEvents
+} from "./trips.js";
 
 // ── PREDEFINISANE BOJE VOZILA ────────────────────────────────
 const VEHICLE_COLORS = [
@@ -55,6 +66,26 @@ const REQUIRED_EQUIPMENT_ITEMS = ["triangle", "first_aid", "vest", "tow_rope", "
 
 function equipmentLabel(code) {
   return REQUIRED_EQUIPMENT_ITEMS.includes(code) ? t("equipment_" + code) : code;
+}
+
+// Obavezna oprema prema kategoriji vozila (iz saobraćajne). Kategorija bez
+// izbora (null) dobija punu listu da se ništa ne sakrije.
+const REQUIRED_EQUIPMENT_BY_CATEGORY = {
+  passenger:    ["triangle", "first_aid", "vest", "tow_rope", "spare_wheel", "accident_report"],
+  van:          ["triangle", "first_aid", "vest", "tow_rope", "spare_wheel", "accident_report", "fire_extinguisher"],
+  truck:        ["triangle", "first_aid", "vest", "tow_rope", "spare_wheel", "fire_extinguisher", "wheel_chocks"],
+  bus:          ["triangle", "first_aid", "vest", "tow_rope", "spare_wheel", "fire_extinguisher", "wheel_chocks"],
+  motorcycle:   ["first_aid"],
+  trailer:      ["triangle", "wheel_chocks"],
+  work_machine: ["fire_extinguisher", "first_aid"],
+  other:        ["fire_extinguisher", "first_aid"],
+};
+
+// Lista obavezne opreme za datu kategoriju (redosled kao u REQUIRED_EQUIPMENT_ITEMS)
+export function requiredEquipmentFor(category) {
+  const list = REQUIRED_EQUIPMENT_BY_CATEGORY[category];
+  if (!list) return [...REQUIRED_EQUIPMENT_ITEMS];
+  return REQUIRED_EQUIPMENT_ITEMS.filter(eq => list.includes(eq));
 }
 
 // ── PNEUMATICI ─────────────────────────────────────────────────
@@ -192,7 +223,8 @@ export async function renderVehicles(container, initialFilter = null) {
     return;
   }
 
-  if (initialFilter) currentFilter = initialFilter;
+  // Dolazak sa kontrolne table sa zadatim statusom: počni bez stare pretrage
+  if (initialFilter) { currentFilter = initialFilter; searchTerm = ""; }
 
   const canEdit = S.profile?.role === "master_admin" || S.profile?.role === "fleet_admin";
 
@@ -238,6 +270,11 @@ export async function renderVehicles(container, initialFilter = null) {
   if (canEdit) {
     document.getElementById("btn-add-vehicle")?.addEventListener("click", () => openVehicleForm());
   }
+
+  // Polje za pretragu mora da prikazuje isti tekst po kome je lista filtrirana
+  // (inače se posle povratka iz kartice vozila vidi prazno polje, a lista je filtrirana)
+  const vehicleSearchEl = document.getElementById("vehicle-search");
+  if (vehicleSearchEl) vehicleSearchEl.value = searchTerm;
 
   document.getElementById("vehicle-search")?.addEventListener("input", (e) => {
     searchTerm = e.target.value.toLowerCase();
@@ -370,7 +407,7 @@ function renderList() {
   `;
 
   list.querySelectorAll(".vehicle-row").forEach(row => {
-    row.addEventListener("click", () => openVehicleDetail(row.dataset.id));
+    row.addEventListener("click", () => openVehicleDetail(row.dataset.id, "tech", null, null));
   });
 }
 
@@ -435,7 +472,17 @@ function vehicleRow(v) {
 
 // ── DETAIL POGLED ─────────────────────────────────────────────
 // initialTab — omogućava skok direktno na neki tab (npr. sa dashboarda na "service")
-export async function openVehicleDetail(vehicleId, initialTab = "tech") {
+// Zaduženje koje treba otvoriti/istaći kad se tab "Zaduženja" učita
+// (link iz liste zaduženja → vozilo → to zaduženje).
+let pendingFocusAssignmentId = null;
+
+// Kuda vraća "← Nazad" u kartici vozila: { vehicleId, fn } ili null (= lista vozila).
+// Ponovno otvaranje iste kartice (npr. posle izmene) ne dira ovu vrednost.
+let vehicleBack = null;
+
+export async function openVehicleDetail(vehicleId, initialTab = "tech", focusAssignmentId = null, onBack = undefined) {
+  if (onBack !== undefined) vehicleBack = onBack ? { vehicleId, fn: onBack } : null;
+  pendingFocusAssignmentId = focusAssignmentId;
   currentVehicleId = vehicleId;
   let vehicle = allVehicles.find(v => v.id === vehicleId);
 
@@ -500,7 +547,11 @@ export async function openVehicleDetail(vehicleId, initialTab = "tech") {
     <div id="vehicle-tab-content"></div>
   `;
 
-  document.getElementById("btn-back")?.addEventListener("click", () => renderVehicles(container));
+  document.getElementById("btn-back")?.addEventListener("click", () => {
+    const back = vehicleBack?.vehicleId === vehicleId ? vehicleBack.fn : null;
+    vehicleBack = null;
+    if (back) back(); else renderVehicles(container);
+  });
   if (canEdit) {
     document.getElementById("btn-edit-vehicle")?.addEventListener("click", () => openVehicleForm(vehicle));
     document.getElementById("btn-delete-vehicle")?.addEventListener("click", () => archiveVehicle(vehicle));
@@ -591,8 +642,11 @@ function renderSafetyTab(v) {
   const tireOk = !tireType ? null : (tireType === "all_season" || tireType === expectedTireSeason());
   const tireBadgeClass = tireType ? (tireOk ? "badge--active" : "badge--broken") : "badge--inactive";
 
-  const equipmentRows = REQUIRED_EQUIPMENT_ITEMS.map(eq => {
-    const has = (v.requiredEquipment || []).includes(eq);
+  const required = requiredEquipmentFor(v.category);
+  const owned = v.requiredEquipment || [];
+  const extra = owned.filter(eq => !required.includes(eq));
+  const equipmentRows = required.map(eq => {
+    const has = owned.includes(eq);
     const color = has ? "var(--color-success)" : "var(--color-danger)";
     return `
       <div class="detail-row">
@@ -617,23 +671,182 @@ function renderSafetyTab(v) {
       </div>
     </div>
 
-    <div class="form-section-title" style="margin-top:16px">${t("vehicle_required_equipment")}</div>
+    <div class="form-section-title" style="margin-top:16px">${t("vehicle_required_equipment")}${v.category ? ` — ${vehicleCategoryLabel(v.category)}` : ""}</div>
     <div class="detail-table">
       ${equipmentRows}
     </div>
+    ${extra.length ? `
+      <div class="form-section-title" style="margin-top:16px">${t("vehicle_equipment_extra")}</div>
+      <div class="detail-table">
+        <div class="detail-row"><div class="detail-row__value">${extra.map(equipmentLabel).join(", ")}</div></div>
+      </div>` : ""}
   `;
+}
+
+// ── TAB "FINANSIJSKI PODACI" ──────────────────────────────────
+// Zbir troškova vozila za izabrani period: gorivo, putarine, parking,
+// pranje, ostali troškovi i servisi. Servisi se računaju SAMO kad su
+// završeni (planirani i otkazani nisu trošak). Podaci se učitavaju jednom
+// (upiti samo po vehicleId, bez složenih indeksa), a promena perioda ih
+// samo filtrira u memoriji.
+function financeTotals(services, entries, from, to) {
+  const fromMs = from ? from.getTime() : -Infinity;
+  const toMs   = to   ? to.getTime()   : Infinity;
+  const inPeriod = (val) => {
+    const ms = val?.toMillis ? val.toMillis() : new Date(val).getTime();
+    return !isNaN(ms) && ms >= fromMs && ms <= toMs;
+  };
+
+  const sum = {
+    fuelCount: 0, fuelL: 0, fuelCost: 0,
+    toll: 0, parking: 0, washing: 0, other: 0,
+    serviceCount: 0, serviceCost: 0, servicePlanned: 0, serviceCancelled: 0,
+  };
+
+  entries.filter(e => inPeriod(e.createdAt)).forEach(e => {
+    if (e.type === "fuel") {
+      sum.fuelCount++;
+      sum.fuelL    += Number(e.fuelAmount) || 0;
+      sum.fuelCost += Number(e.fuelCost)   || 0;
+    } else if (e.type === "toll")       sum.toll    += Number(e.amount) || 0;
+    else if (e.type === "parking")      sum.parking += Number(e.amount) || 0;
+    else if (e.type === "washing")      sum.washing += Number(e.amount) || 0;
+    else if (e.type === "other_cost")   sum.other   += Number(e.amount) || 0;
+  });
+
+  services.filter(sv => inPeriod(sv.serviceDate)).forEach(sv => {
+    const status = effectiveServiceStatus(sv);
+    if (status === SERVICE_STATUS.DONE) {
+      sum.serviceCount++;
+      sum.serviceCost += Number(sv.cost) || 0;
+    } else if (status === SERVICE_STATUS.CANCELLED) {
+      sum.serviceCancelled++;
+    } else {
+      sum.servicePlanned++; // zakazano ili u servisu
+    }
+  });
+
+  sum.total = sum.fuelCost + sum.toll + sum.parking + sum.washing + sum.other + sum.serviceCost;
+  return sum;
+}
+
+function financeSummaryHTML(sum, from, to) {
+  const rsd = (n) => `${Math.round(n).toLocaleString()} RSD`;
+  const periodLabel = (from || to)
+    ? `${from ? toDMY(from) : "…"} – ${to ? toDMY(to) : "…"}`
+    : t("finance_all_period");
+  const avgPrice = sum.fuelL > 0 ? `${t("finance_avg_price")}: ${(sum.fuelCost / sum.fuelL).toFixed(2)} RSD/L` : "";
+
+  const card = (icon, label, value, sub = "") => `
+    <div class="finance-card">
+      <div class="finance-card__label">${icon} ${label}</div>
+      <div class="finance-card__value">${value}</div>
+      ${sub ? `<div class="finance-card__sub">${sub}</div>` : ""}
+    </div>`;
+
+  const skipped = [];
+  if (sum.servicePlanned)   skipped.push(`${t("service_status_planned").toLowerCase()}: ${sum.servicePlanned}`);
+  if (sum.serviceCancelled) skipped.push(`${t("service_status_cancelled").toLowerCase()}: ${sum.serviceCancelled}`);
+
+  return `
+    <div class="finance-period-label">📅 ${t("finance_period_label")}: <strong>${periodLabel}</strong></div>
+    <div class="finance-grid">
+      ${card("⛽", t("trip_entry_fuel"), rsd(sum.fuelCost),
+          `${sum.fuelL.toFixed(1)} L · ${sum.fuelCount} ${t("finance_fillups")}${avgPrice ? " · " + avgPrice : ""}`)}
+      ${card("🛣️", t("trip_entry_toll"),    rsd(sum.toll))}
+      ${card("🅿️", t("trip_entry_parking"), rsd(sum.parking))}
+      ${card("🚿", t("trip_entry_washing"), rsd(sum.washing))}
+      ${card("📋", t("trip_entry_cost"),    rsd(sum.other))}
+      ${card("🔧", t("finance_services"),   rsd(sum.serviceCost),
+          `${sum.serviceCount} ${t("finance_services_done")}${skipped.length ? " · " + t("finance_services_not_counted") + " (" + skipped.join(", ") + ")" : ""}`)}
+      <div class="finance-card finance-card--total">
+        <div class="finance-card__label">💰 ${t("finance_total")}</div>
+        <div class="finance-card__value">${rsd(sum.total)}</div>
+      </div>
+    </div>`;
+}
+
+// Lista pojedinačnih troškova za izabrani period (gorivo, putarine, parking,
+// pranje, ostalo + servisi). Unosi su klikabilni (svi detalji), a lista se
+// slaže sa zbirnim karticama iznad (isti period, isti datum = createdAt).
+function financeListHTML(services, entries, from, to) {
+  const fromMs = from ? from.getTime() : -Infinity;
+  const toMs   = to   ? to.getTime()   : Infinity;
+  const inPeriod = (val) => { const ms = toMsDet(val); return ms && ms >= fromMs && ms <= toMs; };
+  const icons = { fuel: "⛽", toll: "🛣️", parking: "🅿️", washing: "🚿", other_cost: "📋" };
+  const labels = {
+    fuel: t("trip_entry_fuel"), toll: t("trip_entry_toll"), parking: t("trip_entry_parking"),
+    washing: t("trip_entry_washing"), other_cost: t("trip_entry_cost"),
+  };
+  const admin = isAdminViewer();
+
+  const items = [];
+  entries.filter(e => icons[e.type] && inPeriod(e.createdAt)).forEach(e => {
+    rememberEntry(e);
+    const isFuel = e.type === "fuel";
+    const main = isFuel
+      ? `${fmtNumDet(e.fuelAmount, 2)} L · ${fmtRsdDet(e.fuelCost)}`
+      : fmtRsdDet(e.amount);
+    const sub = [
+      isFuel && e.fuelType ? t("fuel_" + e.fuelType) : null,
+      isFuel && e.fuelStation ? "🏪 " + e.fuelStation : null,
+      !isFuel && e.location ? "📍 " + e.location : null,
+      e.receiptNo ? `${t("trip_fuel_receipt")}: ${e.receiptNo}` : null,
+      e.driverName ? "👤 " + e.driverName : null,
+    ].filter(Boolean).map(escDet).join(" · ");
+    items.push({
+      ms: toMsDet(e.createdAt),
+      html: `
+        <div class="finance-list-row${admin ? " finance-list-row--clickable" : ""}"
+          ${admin ? `data-entry-id="${escDet(e.id)}" role="button" tabindex="0"` : ""}>
+          <span class="finance-list-row__icon">${icons[e.type]}</span>
+          <div class="finance-list-row__body">
+            <div class="finance-list-row__main"><span class="badge badge--${isFuel ? "info" : "inactive"}">${labels[e.type]}</span> <strong>${main}</strong></div>
+            ${sub ? `<div class="finance-list-row__sub">${sub}</div>` : ""}
+          </div>
+          <div class="finance-list-row__date">${formatDate(e.createdAt)}</div>
+        </div>`,
+    });
+  });
+
+  services.filter(sv => inPeriod(sv.serviceDate)).forEach(sv => {
+    const status = effectiveServiceStatus(sv);
+    const done = status === SERVICE_STATUS.DONE;
+    const sub = [
+      sv.workshop ? "🏭 " + sv.workshop : null,
+      sv.km ? "🛣️ " + fmtNumDet(sv.km) + " km" : null,
+      sv.description || null,
+    ].filter(Boolean).map(escDet).join(" · ");
+    items.push({
+      ms: toMsDet(sv.serviceDate),
+      html: `
+        <div class="finance-list-row">
+          <span class="finance-list-row__icon">🔧</span>
+          <div class="finance-list-row__body">
+            <div class="finance-list-row__main"><span class="badge badge--service">${escDet(t("service_type_" + sv.serviceType) || sv.serviceType || "")}</span>
+              <strong>${done ? fmtRsdDet(sv.cost) : escDet(t("service_status_" + status))}</strong></div>
+            ${sub ? `<div class="finance-list-row__sub">${sub}</div>` : ""}
+          </div>
+          <div class="finance-list-row__date">${formatDate(sv.serviceDate)}</div>
+        </div>`,
+    });
+  });
+
+  if (items.length === 0) return `<div class="empty-state"><p>${t("no_data")}</p></div>`;
+  items.sort((a, b) => b.ms - a.ms);
+  return `<div class="finance-list">${items.map(i => i.html).join("")}</div>`;
 }
 
 async function loadFinanceTab(container, v) {
   container.innerHTML = `<div class="loading">${t("loading")}</div>`;
   try {
-    const snap = await getDocs(
-      query(
-        collection(db, "companies", S.companyId, "services"),
-        where("vehicleId", "==", v.id)
-      )
-    );
-    const totalServiceCost = snap.docs.reduce((sum, d) => sum + (Number(d.data().cost) || 0), 0);
+    const col = (name) => collection(db, "companies", S.companyId, name);
+    const [svcSnap, entSnap] = await Promise.all([
+      getDocs(query(col("services"),    where("vehicleId", "==", v.id))),
+      getDocs(query(col("tripEntries"), where("vehicleId", "==", v.id))),
+    ]);
+    const services = svcSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const entries  = entSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
     const rows = [
       [t("vehicle_owner"),          v.ownerName],
@@ -642,15 +855,88 @@ async function loadFinanceTab(container, v) {
       [t("vehicle_purchase_value"), v.purchaseValue ? Number(v.purchaseValue).toLocaleString() + " RSD" : null],
     ];
 
+    const defaultFrom = new Date();
+    defaultFrom.setDate(defaultFrom.getDate() - 30);
+
     container.innerHTML = `
-      ${totalServiceCost > 0 ? `
-        <div class="service-total-bar">
-          <span>${t("service_total_cost")}:</span>
-          <strong>${totalServiceCost.toLocaleString()} RSD</strong>
+      <div class="finance-period">
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">${t("report_date_from")}</label>
+            <input id="fin-from" class="form-input" type="text" inputmode="numeric" maxlength="10"
+              placeholder="${datePlaceholder()}" value="${toDMY(defaultFrom)}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">${t("report_date_to")}</label>
+            <input id="fin-to" class="form-input" type="text" inputmode="numeric" maxlength="10"
+              placeholder="${datePlaceholder()}" value="${todayDMY()}" />
+          </div>
         </div>
-      ` : ""}
+        <div class="finance-period__actions">
+          <button type="button" class="btn btn--secondary btn--sm" data-fin-preset="30">${t("finance_preset_30")}</button>
+          <button type="button" class="btn btn--secondary btn--sm" data-fin-preset="year">${t("finance_preset_year")}</button>
+          <button type="button" class="btn btn--secondary btn--sm" data-fin-preset="all">${t("finance_preset_all")}</button>
+          <button type="button" class="btn btn--primary btn--sm" id="fin-apply">${t("finance_apply")}</button>
+        </div>
+      </div>
+
+      <div id="fin-summary"></div>
+
+      <div class="form-section-title" style="margin-top:18px">${t("finance_list_title")}</div>
+      ${isAdminViewer() ? `<div class="form-hint" style="margin-bottom:8px">${t("finance_list_hint")}</div>` : ""}
+      <div id="fin-list"></div>
+
+      <div class="form-section-title" style="margin-top:18px">${t("finance_purchase_title")}</div>
       ${detailTable(rows)}
     `;
+
+    attachDateMask("fin-from");
+    attachDateMask("fin-to");
+
+    const apply = () => {
+      // Oba datuma su opciona: prazno "Od" = od početka, prazno "Do" = do danas i dalje
+      const res = collectDates([{ id: "fin-from" }, { id: "fin-to" }]);
+      if (!res.ok) return;
+      const from = res.values["fin-from"];
+      const to   = res.values["fin-to"];
+      if (from && to && from > to) {
+        setDateError("fin-to", t("date_err_range_to_before_from"), { focus: true });
+        return;
+      }
+      if (to) to.setHours(23, 59, 59, 999);
+      const sum = financeTotals(services, entries, from, to);
+      document.getElementById("fin-summary").innerHTML = financeSummaryHTML(sum, from, to);
+      document.getElementById("fin-list").innerHTML = financeListHTML(services, entries, from, to);
+    };
+
+    const setPeriod = (from, to) => {
+      document.getElementById("fin-from").value = from ? toDMY(from) : "";
+      document.getElementById("fin-to").value   = to   ? toDMY(to)   : "";
+      apply();
+    };
+
+    container.querySelectorAll("[data-fin-preset]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const kind = btn.dataset.finPreset;
+        const today = new Date();
+        if (kind === "30") {
+          const d = new Date(); d.setDate(d.getDate() - 30);
+          setPeriod(d, today);
+        } else if (kind === "year") {
+          setPeriod(new Date(today.getFullYear(), 0, 1), today);
+        } else {
+          setPeriod(null, null); // ceo period
+        }
+      });
+    });
+    document.getElementById("fin-apply")?.addEventListener("click", apply);
+    ["fin-from", "fin-to"].forEach(id =>
+      document.getElementById(id)?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); apply(); }
+      })
+    );
+
+    apply();
   } catch (e) {
     container.innerHTML = `<div class="error-state">${t("error")}: ${e.message}</div>`;
   }
@@ -806,21 +1092,162 @@ export function incidentToServicePrefill(inc) {
   };
 }
 
+// ── TAB "ZADUŽENJA" — sve aktivnosti svih vozača na ovom vozilu ──
+// Zaduženja su grupisana po vozaču. Klik na vozača otvara/zatvara njegova
+// zaduženja, a klik na zaduženje otvara vožnje sa gorivom, troškovima i
+// prijavama (ista kartica kao u tabu "Zaduženja" kod vozača).
+function escText(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+function assignSummaryBoxes(sum) {
+  return `
+    <div class="assignment-history-summary assignment-history-summary--five">
+      <div class="assignment-history-summary__item">
+        <span class="assignment-history-summary__value">${sum.count}</span>
+        <span class="assignment-history-summary__label">${t("vehicle_assign_count")}</span>
+      </div>
+      <div class="assignment-history-summary__item">
+        <span class="assignment-history-summary__value">${sum.km.toLocaleString()} km</span>
+        <span class="assignment-history-summary__label">${t("assignment_summary_km")}</span>
+      </div>
+      <div class="assignment-history-summary__item">
+        <span class="assignment-history-summary__value">${sum.fuelL.toFixed(1)} L</span>
+        <span class="assignment-history-summary__label">${t("trip_stats_fuel")}</span>
+      </div>
+      <div class="assignment-history-summary__item">
+        <span class="assignment-history-summary__value">${(sum.fuelCost + sum.otherCost).toLocaleString()} RSD</span>
+        <span class="assignment-history-summary__label">${t("assignment_summary_costs")}</span>
+      </div>
+      <div class="assignment-history-summary__item ${sum.incidents > 0 ? "assignment-history-summary__item--warn" : ""}">
+        <span class="assignment-history-summary__value">${sum.incidents}</span>
+        <span class="assignment-history-summary__label">${t("trip_stats_incidents")}</span>
+      </div>
+    </div>`;
+}
+
+function driverGroupHTML(group, history) {
+  const { tripsByAssignment, entriesByTrip, entriesByAssignment } = history;
+  const sum = summarizeAssignments(group.assignments, tripsByAssignment, entriesByAssignment);
+
+  // Period: od najranijeg početka do najkasnijeg kraja (ili "Aktivno")
+  const first = group.assignments[group.assignments.length - 1];
+  const last  = group.assignments[0];
+  const periodEnd = sum.hasActive
+    ? t("assignment_status_active")
+    : (last?.endDate ? formatDate(last.endDate) : "—");
+
+  return `
+    <section class="vehicle-driver-group">
+      <div class="vehicle-driver-group__header" data-toggle-driver-group role="button" tabindex="0" aria-expanded="true">
+        <div class="vehicle-driver-group__who">
+          <div class="vehicle-driver-group__name">
+            👤 <strong>${escText(group.driverName)}</strong>
+            ${group.assignments[0]?.driverId ? detailButton("data-detail-driver", group.assignments[0].driverId, t("det_title_driver")) : ""}
+            ${sum.hasActive ? `<span class="trip-history-badge trip-history-badge--active">🟢 ${t("assignment_status_active")}</span>` : ""}
+          </div>
+          <div class="vehicle-driver-group__period">
+            📅 ${formatDate(first?.startDate)} → ${periodEnd} · ${sum.count} ${t("vehicle_assign_assignments_n")}
+          </div>
+        </div>
+        <div class="vehicle-driver-group__stats">
+          <span class="trip-history-badge">🛣️ ${sum.km.toLocaleString()} km</span>
+          <span class="trip-history-badge">⛽ ${sum.fuelL.toFixed(1)} L</span>
+          <span class="trip-history-badge">💰 ${(sum.fuelCost + sum.otherCost).toLocaleString()} RSD</span>
+          ${sum.incidents > 0 ? `<span class="trip-history-badge trip-history-badge--warn">⚠️ ${sum.incidents}</span>` : ""}
+          <span class="vehicle-driver-group__chevron">▾</span>
+        </div>
+      </div>
+      <div class="vehicle-driver-group__body">
+        ${group.assignments.map(a =>
+          historyAssignmentCard(a, tripsByAssignment, entriesByTrip, entriesByAssignment, { hideVehicle: true })
+        ).join("")}
+      </div>
+    </section>`;
+}
+
 async function loadAssignmentsTab(container, vehicle) {
   container.innerHTML = `<div class="loading">${t("loading")}</div>`;
   try {
-    const snap = await getDocs(
-      query(
-        collection(db, "companies", S.companyId, "assignments"),
-        where("vehicleId", "==", vehicle.id),
-        orderBy("startDate", "desc")
-      )
-    );
-    const assignments = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const history = await loadVehicleAssignmentHistory(vehicle.id);
+    const { assignments, tripsByAssignment, entriesByAssignment, orphanEntries } = history;
 
-    container.innerHTML = assignments.length === 0
-      ? `<div class="empty-state"><div class="empty-state__icon">🔑</div><p>${t("no_data")}</p></div>`
-      : `<div class="assignment-list">${assignments.map(a => assignmentItem(a)).join("")}</div>`;
+    if (assignments.length === 0 && orphanEntries.length === 0) {
+      container.innerHTML = `<div class="empty-state"><div class="empty-state__icon">🔑</div><p>${t("no_data")}</p></div>`;
+      return;
+    }
+
+    const groups = groupAssignmentsByDriver(assignments);
+    const total  = summarizeAssignments(assignments, tripsByAssignment, entriesByAssignment);
+
+    container.innerHTML = `
+      ${assignSummaryBoxes(total)}
+
+      <div class="vehicle-assign-toolbar">
+        <span class="form-hint">${t("vehicle_assign_hint")}</span>
+        ${groups.length > 1 ? `<button type="button" class="btn btn--secondary btn--sm" id="btn-toggle-all-drivers"
+          data-state="open">${t("vehicle_assign_collapse_all")}</button>` : ""}
+      </div>
+
+      <div class="vehicle-driver-groups">
+        ${groups.map(g => driverGroupHTML(g, history)).join("")}
+      </div>
+
+      ${orphanEntries.length > 0 ? `
+        <section class="vehicle-driver-group vehicle-driver-group--orphans">
+          <div class="vehicle-driver-group__header vehicle-driver-group__header--static">
+            <div class="vehicle-driver-group__name">📋 <strong>${t("vehicle_assign_orphans")}</strong> (${orphanEntries.length})</div>
+          </div>
+          <div class="vehicle-driver-group__body">
+            <div class="trip-history-card__entries">${orphanEntries.map(e => historyEntryItem(e)).join("")}</div>
+          </div>
+        </section>` : ""}
+    `;
+
+    // Otvaranje/zatvaranje zaduženja i vožnji (isti handleri kao kod vozača)
+    attachAssignmentHistoryEvents(container);
+
+    // Dolazak iz liste zaduženja: razvij traženo zaduženje, skroluj do njega i istakni ga
+    if (pendingFocusAssignmentId) {
+      const target = [...container.querySelectorAll("[data-assignment-id]")]
+        .find(el => el.dataset.assignmentId === pendingFocusAssignmentId);
+      pendingFocusAssignmentId = null;
+      if (target) {
+        target.querySelector(".assignment-history-card__trips")?.classList.remove("hidden");
+        target.querySelector("[data-toggle-assignment]")?.classList.add("assignment-history-card__header--open");
+        target.classList.add("assignment-history-card--focus");
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        setTimeout(() => target.classList.remove("assignment-history-card--focus"), 2500);
+      }
+    }
+
+    // Otvaranje/zatvaranje grupe jednog vozača
+    const setGroupOpen = (group, open) => {
+      group.classList.toggle("vehicle-driver-group--collapsed", !open);
+      group.querySelector("[data-toggle-driver-group]")?.setAttribute("aria-expanded", String(open));
+    };
+    container.querySelectorAll("[data-toggle-driver-group]").forEach(header => {
+      const toggle = () => {
+        const group = header.closest(".vehicle-driver-group");
+        setGroupOpen(group, group.classList.contains("vehicle-driver-group--collapsed"));
+      };
+      header.addEventListener("click", toggle);
+      header.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+      });
+    });
+
+    // "Skupi sve / Razvij sve"
+    const toggleAll = document.getElementById("btn-toggle-all-drivers");
+    toggleAll?.addEventListener("click", () => {
+      const open = toggleAll.dataset.state !== "open"; // sledeće stanje
+      container.querySelectorAll("section.vehicle-driver-group:not(.vehicle-driver-group--orphans)")
+        .forEach(g => setGroupOpen(g, open));
+      toggleAll.dataset.state = open ? "open" : "closed";
+      toggleAll.textContent = open ? t("vehicle_assign_collapse_all") : t("vehicle_assign_expand_all");
+    });
   } catch (e) {
     container.innerHTML = `<div class="error-state">${t("error")}: ${e.message}</div>`;
   }
@@ -1032,6 +1459,12 @@ async function openVehicleForm(vehicle = null) {
         <input id="f-tiresDimensions" class="form-input" type="text" placeholder="205/55/16" value="${v.tires?.dimensions || ""}" />
       </div>
     </div>
+    <div class="form-group form-group--checkbox">
+      <label class="form-checkbox-label">
+        <input id="f-tireReminderDisabled" type="checkbox" ${v.tireReminderDisabled === true ? "checked" : ""} />
+        ${t("vehicle_tire_reminder_disabled")}
+      </label>
+    </div>
 
     <div class="form-section-title" style="margin-top:8px">${t("vehicle_tab_finance")}</div>
     <div class="form-row">
@@ -1192,7 +1625,25 @@ async function saveVehicle(vehicleId) {
       valid = false;
     }
   });
-  if (!valid) throw new Error("validation");
+
+  // Datumi (svi opcioni): nepostojeći datum (npr. 31.09.2026) više se ne
+  // pretvara tiho u prazno polje — korisnik dobija poruku ispod polja.
+  const vehicleDates = collectDates([
+    { id: "f-firstRegDate" },
+    { id: "f-regExpiry" },
+    { id: "f-insuranceExpiry" },
+    { id: "f-purchaseDate" },
+    { id: "f-tachographExpiry" },
+  ]);
+  if (!vehicleDates.ok) valid = false;
+
+  if (!valid) {
+    // Fokus na prvo pogrešno polje po redosledu u formi
+    const firstBad = document.querySelector(".input--error");
+    firstBad?.focus();
+    firstBad?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    throw new Error("validation");
+  }
 
   try {
     // ── JEDINSTVENOST TABLICE ─────────────────────────────────
@@ -1248,6 +1699,7 @@ async function saveVehicle(vehicleId) {
       tachographExpiry: dateOrNull("f-tachographExpiry"),
       requiredEquipment,
       tires: (tiresType || tiresDimensions) ? { type: tiresType, dimensions: tiresDimensions } : null,
+      tireReminderDisabled: !!document.getElementById("f-tireReminderDisabled")?.checked,
       purchaseDate:     dateOrNull("f-purchaseDate"),
       purchaseType:     document.getElementById("f-purchaseType")?.value.trim() || null,
       purchaseValue:    numOrNull("f-purchaseValue"),
@@ -1412,8 +1864,17 @@ export async function openServiceForm(vehicle, service = null, prefill = null, o
   `;
 
   openModal(isEdit ? `${t("edit")}: ${t("service_type_" + s.serviceType) || s.serviceType}` : t("service_add"), bodyHTML, async () => {
-    let serviceDateVal = dateOrNull("sf-date");
-    if (!serviceDateVal) return;
+    const svcDates = collectDates([
+      { id: "sf-date", required: true },
+      { id: "sf-endDate" },
+    ]);
+    if (!svcDates.ok) return false; // false = dijalog ostaje otvoren
+    let serviceDateVal = svcDates.values["sf-date"];
+    const serviceEndVal = svcDates.values["sf-endDate"];
+    if (serviceEndVal && serviceEndVal < serviceDateVal) {
+      setDateError("sf-endDate", t("date_err_service_end_before_start"), { focus: true });
+      return false;
+    }
     try {
       // Servis se ne zakazuje vikendom (subota → petak, nedelja → ponedeljak).
       // Ne važi za servis koji je već obavljen (unos unazad) — tu se upisuje
@@ -1559,6 +2020,8 @@ function openCompleteServiceModal(vehicle, service) {
   `;
 
   openModal(t("service_complete_title"), bodyHTML, async () => {
+    const csDates = collectDates([{ id: "cs-endDate" }]);
+    if (!csDates.ok) return false; // dijalog ostaje otvoren, poruka je ispod polja
     try {
       const endKm = numOrNull("cs-endKm");
       await updateDoc(doc(db, "companies", S.companyId, "services", service.id), {
@@ -1716,83 +2179,11 @@ function serviceItem(s, vehicle, canEdit) {
   `;
 }
 
-function assignmentItem(a) {
-  return `
-    <div class="assignment-item">
-      <div class="assignment-item__header">
-        <span class="badge badge--${a.status === 'active' ? 'active' : 'inactive'}">
-          ${t("assignment_status_" + a.status)}
-        </span>
-        <span class="assignment-item__dates">
-          ${formatDate(a.startDate)} ${a.endDate ? "→ " + formatDate(a.endDate) : ""}
-        </span>
-      </div>
-      <div class="assignment-item__driver">👤 ${a.driverName || "—"}</div>
-      <div class="assignment-item__km">
-        ${a.startKm ? a.startKm.toLocaleString() + " km" : ""}
-        ${a.endKm ? " → " + a.endKm.toLocaleString() + " km" : ""}
-      </div>
-      ${a.reason ? `<div class="assignment-item__reason">${a.reason}</div>` : ""}
-      ${a.tripType === "intercity" && a.destination ? `<div class="assignment-item__dest">📍 ${a.destination}</div>` : ""}
-    </div>
-  `;
-}
-
 function formatDate(val) {
   return formatDateDMY(val);
 }
 
-// ── DATUMI: prikaz i unos u lokalnom formatu dd/mm/yyyy ──────
-// Napomena: <input type="date"> prikazuje kalendar/datum u formatu koji
-// zavisi od jezika/regije PODEŠENE U BROWSERU/OS-u korisnika (mm/dd/yyyy
-// za en-US, dd/mm/yyyy za sr-RS, itd.) — to nije nešto što aplikacija može
-// da promeni preko HTML/CSS/JS za taj input tip. Zato ovde koristimo obično
-// tekstualno polje sa maskom, tako da je format uvek dd/mm/yyyy za sve
-// korisnike, nezavisno od podešavanja njihovog browsera.
-
-function toDMY(val) {
-  if (!val) return "";
-  const d = val.toDate ? val.toDate() : new Date(val);
-  if (isNaN(d)) return "";
-  const dd = String(d.getDate()).padStart(2, "0");
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  return `${dd}.${mm}.${d.getFullYear()}`;
-}
-
-function todayDMY() {
-  return toDMY(new Date());
-}
-
-// Placeholder prati jezik aplikacije (dd/mm ostaje fiksno — poslovno
-// pravilo firme — menja se samo naziv za "godinu": yyyy (en) / gggg (sr)).
-function datePlaceholder() {
-  return getCurrentLang() === "en" ? "dd.mm.yyyy" : "dd.mm.gggg";
-}
-
-// Parsira "dd/mm/yyyy" u Date objekat (lokalno vreme, ponoć). Vraća null
-// ako string nije kompletan ili predstavlja nepostojeći datum (npr. 31/02).
-function parseDMY(str) {
-  if (!str) return null;
-  const m = str.trim().match(/^(\d{1,2})[./](\d{1,2})[./](\d{4})\.?$/);
-  if (!m) return null;
-  const day = Number(m[1]), month = Number(m[2]), year = Number(m[3]);
-  const d = new Date(year, month - 1, day);
-  if (d.getFullYear() !== year || d.getMonth() !== month - 1 || d.getDate() !== day) return null;
-  return d;
-}
-
-// Auto-formatiranje dok korisnik kuca: cifre se same grupišu u dd/mm/yyyy.
-function attachDateMask(id) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.addEventListener("input", () => {
-    const digits = el.value.replace(/\D/g, "").slice(0, 8);
-    let out = digits;
-    if (digits.length > 4) out = `${digits.slice(0, 2)}.${digits.slice(2, 4)}.${digits.slice(4)}`;
-    else if (digits.length > 2) out = `${digits.slice(0, 2)}.${digits.slice(2)}`;
-    el.value = out;
-  });
-}
+// Datumi (maska, kalendar, provera) — vidi date-input.js
 
 function numOrNull(id) {
   const val = document.getElementById(id)?.value;
