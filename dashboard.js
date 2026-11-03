@@ -14,6 +14,7 @@ import { S, setActiveCompany, navigateTo, showToast, openModal } from "./app.js"
 import { getCompanies } from "./firebase.js";
 import { isVehicleRegistered, needsTachograph, openVehicleDetail, openServiceForm, fuelLevelScaleHTML, bindFuelLevelScale, fuelLevelLabel } from "./vehicles.js";
 import { mountPendingBanner } from "./pending-requests.js";
+import { getServiceProviders } from "./servicers.js";
 import {
   effectiveServiceStatus, isServiceToday, isServiceOverdue, overdueDays, SERVICE_STATUS,
   getServiceSettings, getRegularServiceInfo, timeLeftText, kmLeftText, getTireSeasonReminder
@@ -246,6 +247,13 @@ async function loadDashboardData() {
       )
     ).catch(() => ({ docs: [] }));
 
+    // Adresa servisa za starije zapise (bez snimljene adrese) — iz kartice servisera
+    let providerAddr = new Map();
+    try {
+      const provs = await getServiceProviders();
+      providerAddr = new Map(provs.map(p => [p.id, p.address || ""]));
+    } catch { /* adresa je dodatni podatak — dashboard radi i bez nje */ }
+
     const mapService = (d) => {
       const s = { id: d.id, ...d.data() };
       const veh = vehicles.find(v => v.id === s.vehicleId);
@@ -253,6 +261,7 @@ async function loadDashboardData() {
         ...s,
         vehicleBrand: veh?.brand || "",
         vehicleModel: veh?.model || "",
+        workshopAddress: s.workshopAddress || (s.servicerId ? providerAddr.get(s.servicerId) : "") || "",
       };
     };
 
@@ -321,23 +330,9 @@ async function loadDashboardData() {
       } catch (e) {
         console.error("Tire services error:", e);
       }
-      const nowTs = new Date();
       activeVehicles.forEach(v => {
-        const r = getTireSeasonReminder(v);
-        if (!r) return;
-        if (v.tireReminderDisabled === true) return; // trajno isključeno (npr. vozilo koristi samo jednu sezonu)
-        const snoozedUntil = toD(v.tireReminderSnoozedUntil);
-        if (snoozedUntil && snoozedUntil > nowTs) return;
-        // početak perioda podsetnika = mesec dana pre roka
-        const windowStart = new Date(r.deadline.getFullYear(), r.deadline.getMonth() - 1, 1);
-        const handled = (tireSvcByVehicle.get(v.id) || []).some(sv => {
-          const st = effectiveServiceStatus(sv);
-          if (st === SERVICE_STATUS.PLANNED || st === SERVICE_STATUS.IN_PROGRESS) return true;
-          if (st === SERVICE_STATUS.DONE) { const d = toD(sv.serviceDate); return d && d >= windowStart; }
-          return false;
-        });
-        if (handled) return;
-        tireReminders.push({ ...r, vehicle: v });
+        const r = computeTireReminder(v, tireSvcByVehicle.get(v.id) || []);
+        if (r) tireReminders.push(r);
       });
       // Najhitnije (najviše zakasnelo / najbliži rok) prvo
       tireReminders.sort((a, b) => a.daysLeft - b.daysLeft);
@@ -356,8 +351,29 @@ async function loadDashboardData() {
       }
     }
 
+    // Vozač: obaveštenja za svako vozilo koje mu je na zaduženju (isto što vidi admin)
+    const vehicleNotices = new Map(); // vehicleId -> obaveštenja
+    if (isDriver) {
+      try {
+        const settings = await getServiceSettings(cid);
+        const assignedIds = [...new Set((assignmentsSnap?.docs || []).map(d => d.data().vehicleId).filter(Boolean))];
+        for (const vid of assignedIds) {
+          const veh = vehicles.find(x => x.id === vid);
+          if (!veh) continue;
+          let vehSvcs = [];
+          try {
+            const snap = await getDocs(query(collection(db, "companies", cid, "services"), where("vehicleId", "==", vid)));
+            vehSvcs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          } catch (e) { console.error("Driver vehicle services error:", e); }
+          vehicleNotices.set(vid, buildVehicleNotices(veh, vehSvcs, settings, providerAddr));
+        }
+      } catch (e) {
+        console.error("Driver vehicle notices error:", e);
+      }
+    }
+
     content.innerHTML = `
-      ${isDriver ? renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSnap, vehicles, resolvedActiveTrips) : renderAdminDashboard({
+      ${isDriver ? renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSnap, vehicles, resolvedActiveTrips, vehicleNotices) : renderAdminDashboard({
         total, active, inService, unregistered, broken, inactive, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount, serviceReminders, tireReminders
       })}
     `;
@@ -371,6 +387,201 @@ async function loadDashboardData() {
     console.error("Dashboard load error:", e);
     content.innerHTML = `<div class="error-state">${t("error")}: ${e.message}</div>`;
   }
+}
+
+// ── POMOĆNE FUNKCIJE ZA OBAVEŠTENJA O VOZILU ───────────────────
+// Podsetnik za sezonske gume jednog vozila (isti uslovi za admina i vozača):
+// null ako nije potreban, isključen je, odložen ili je zamena već zakazana/odrađena.
+function computeTireReminder(v, tireServices, now = new Date()) {
+  const toD = (x) => x?.toDate ? x.toDate() : (x ? new Date(x) : null);
+  const r = getTireSeasonReminder(v, now);
+  if (!r) return null;
+  if (v.tireReminderDisabled === true) return null; // trajno isključeno (npr. vozilo koristi samo jednu sezonu)
+  const snoozedUntil = toD(v.tireReminderSnoozedUntil);
+  if (snoozedUntil && snoozedUntil > now) return null;
+  // početak perioda podsetnika = mesec dana pre roka
+  const windowStart = new Date(r.deadline.getFullYear(), r.deadline.getMonth() - 1, 1);
+  const handled = (tireServices || []).some(sv => {
+    const st = effectiveServiceStatus(sv);
+    if (st === SERVICE_STATUS.PLANNED || st === SERVICE_STATUS.IN_PROGRESS) return true;
+    if (st === SERVICE_STATUS.DONE) { const d = toD(sv.serviceDate); return d && d >= windowStart; }
+    return false;
+  });
+  if (handled) return null;
+  return { ...r, vehicle: v };
+}
+
+function noticeEsc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+// Sve što admin vidi za jedno vozilo, spakovano za vozača:
+// istek registracije/tahografa, status vozila, zakazani servisi,
+// podsetnik za redovni servis i za sezonske gume.
+function buildVehicleNotices(v, services, settings, providerAddr = new Map()) {
+  const toD = (x) => x?.toDate ? x.toDate() : (x ? new Date(x) : null);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const in30 = new Date(today.getTime() + 30 * 86400000);
+  const dayMs = 86400000;
+
+  // Registracija / tahograf — rok u narednih 30 dana ili već istekao
+  const deadlines = [];
+  const addDeadline = (kind, raw) => {
+    const d = toD(raw);
+    if (!d || isNaN(d)) return;
+    const dd = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    if (dd > in30) return;
+    deadlines.push({ kind, date: dd, daysLeft: Math.round((dd - today) / dayMs) });
+  };
+  addDeadline("reg", v.regExpiry);
+  if (needsTachograph(v)) addDeadline("tachograph", v.tachographExpiry);
+
+  // Zakazani / aktivni servisi: propušteni + narednih 30 dana
+  const scheduled = (services || [])
+    .filter(sv => {
+      const st = effectiveServiceStatus(sv);
+      if (st === SERVICE_STATUS.DONE || st === SERVICE_STATUS.CANCELLED) return false;
+      const d = toD(sv.serviceDate);
+      return d && !isNaN(d) && d <= in30;
+    })
+    .map(sv => ({
+      ...sv,
+      workshopAddress: sv.workshopAddress || (sv.servicerId ? providerAddr.get(sv.servicerId) : "") || "",
+    }))
+    .sort((a, b) => (toD(a.serviceDate) - toD(b.serviceDate)) || String(a.serviceTime || "").localeCompare(String(b.serviceTime || "")));
+
+  // Redovni servis (po vremenu/km) — isti uslovi kao kod admina
+  let regular = null;
+  try {
+    const info = getRegularServiceInfo(v, services || [], settings);
+    if (info && info.alarm && !info.hasOpen && !info.snoozed) regular = info;
+  } catch (e) { console.error("Driver regular service info error:", e); }
+
+  const tire = computeTireReminder(v, (services || []).filter(sv => sv.serviceType === "tires"));
+
+  const badStatus = (v.status === "broken" || v.status === "service") ? v.status : null;
+  return { vehicle: v, deadlines, scheduled, regular, tire, badStatus };
+}
+
+function renderVehicleNotices(n, a = null) {
+  if (!n) return "";
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const toD = (x) => x?.toDate ? x.toDate() : (x ? new Date(x) : null);
+  const items = [];
+
+  n.deadlines.forEach(d => {
+    const expired = d.daysLeft < 0;
+    const urgency = expired || d.daysLeft <= 7 ? "urgent" : d.daysLeft <= 14 ? "warning" : "ok";
+    const kindLabel = d.kind === "tachograph" ? t("dashboard_kind_tachograph") : t("dashboard_kind_reg");
+    items.push(`
+      <div class="upcoming-item upcoming-item--${urgency}">
+        <div class="upcoming-item__main">
+          <span class="upcoming-item__name">${expired ? "⛔" : "📄"} ${noticeEsc(kindLabel)}</span>
+        </div>
+        <div class="upcoming-item__right">
+          <span class="upcoming-item__date">${formatDate(d.date)}</span>
+          <span class="upcoming-item__days">${expired
+            ? t("driver_notice_expired_days", { n: Math.abs(d.daysLeft) })
+            : d.daysLeft + " " + t("dashboard_days_left")}</span>
+        </div>
+      </div>`);
+  });
+
+  if (n.badStatus) {
+    items.push(`
+      <div class="upcoming-item upcoming-item--${n.badStatus === "broken" ? "urgent" : "warning"}">
+        <div class="upcoming-item__main">
+          <span class="upcoming-item__name">🚧 ${t("driver_notice_vehicle_status")}</span>
+        </div>
+        <div class="upcoming-item__right">
+          <span class="upcoming-item__days">${t("vehicle_status_" + n.badStatus)}</span>
+        </div>
+      </div>`);
+  }
+
+  n.scheduled.forEach(s => {
+    const d = toD(s.serviceDate);
+    const daysLeft = Math.ceil((d - today) / 86400000);
+    const status = effectiveServiceStatus(s);
+    const overdue = isServiceOverdue(s);
+    const todayFlag = isServiceToday(s);
+    const urgency = overdue ? "urgent" : todayFlag ? "today" : daysLeft <= 2 ? "urgent" : daysLeft <= 7 ? "warning" : "ok";
+    const badges = [
+      todayFlag ? `<span class="today-badge">${t("dashboard_today")}</span>` : "",
+      overdue ? `<span class="today-badge" style="background:var(--color-danger)">⚠️ ${t("service_status_overdue")} — ${t("service_overdue_days", { n: overdueDays(s) })}</span>` : "",
+      status === SERVICE_STATUS.IN_PROGRESS ? `<span class="today-badge" style="background:var(--color-warning)">${t("service_status_in_progress")}</span>` : "",
+    ].join("");
+    items.push(`
+      <div class="upcoming-item upcoming-item--${urgency}">
+        <div class="upcoming-item__main">
+          <span class="upcoming-item__name">🔧 ${noticeEsc(t("service_type_" + s.serviceType) || s.serviceType || "")}</span>
+          ${s.workshop || s.workshopAddress ? `
+            <div class="upcoming-item__place">
+              ${s.workshop ? `<span class="upcoming-item__plate">🏭 ${noticeEsc(s.workshop)}</span>` : ""}
+              ${s.workshopAddress ? `<span class="upcoming-item__addr">📍 ${noticeEsc(s.workshopAddress)}</span>` : ""}
+            </div>` : ""}
+          ${s.description ? `<span class="upcoming-item__addr">${noticeEsc(s.description)}</span>` : ""}
+        </div>
+        <div class="upcoming-item__right">
+          <span class="upcoming-item__date">
+            <span class="upcoming-item__time${s.serviceTime ? "" : " upcoming-item__time--missing"}" ${s.serviceTime ? "" : `title="${t("service_time_missing")}"`}>🕒 ${noticeEsc(s.serviceTime || "—:—")}</span>
+            ${formatDate(d)}
+            ${badges}
+          </span>
+          <span class="upcoming-item__days">${daysLeft <= 0 ? "" : daysLeft + " " + t("dashboard_days_left")}</span>
+        </div>
+      </div>`);
+  });
+
+  if (n.regular) {
+    const r = n.regular;
+    const late = r.daysLeft < 0 || (r.kmLeft != null && r.kmLeft < 0);
+    const reasons = [];
+    if (r.dateAlarm) reasons.push(`📅 ${timeLeftText(r.daysLeft)}`);
+    if (r.kmAlarm)   reasons.push(`🛣️ ${kmLeftText(r.kmLeft)}`);
+    const dueKm = r.nextKm != null ? ` / ${r.nextKm.toLocaleString()} km` : "";
+    items.push(`
+      <div class="upcoming-item upcoming-item--${late ? "urgent" : "warning"} service-reminder">
+        <div class="service-reminder__body">
+          <div class="upcoming-item__main">
+            <span class="upcoming-item__name">⚠️ ${t("svc_rem_title")}</span>
+          </div>
+          <div class="service-reminder__info">
+            ${t("svc_rem_next_due", { date: formatDate(r.nextDate), km: dueKm })}<br>
+            <strong>${reasons.join(" · ")}</strong>
+          </div>
+        </div>
+      </div>`);
+  }
+
+  if (n.tire) {
+    const r = n.tire;
+    const urgent = r.overdue || r.daysLeft <= 7;
+    const curType = n.vehicle.tires?.type ? t("tire_" + n.vehicle.tires.type) : "";
+    const dims = n.vehicle.tires?.dimensions ? ` (${n.vehicle.tires.dimensions})` : "";
+    items.push(`
+      <div class="upcoming-item upcoming-item--${urgent ? "urgent" : "warning"} service-reminder tire-reminder">
+        <div class="service-reminder__body">
+          <div class="upcoming-item__main">
+            <span class="upcoming-item__name">🛞 ${t("tire_rem_title_" + r.needed)}</span>
+          </div>
+          <div class="service-reminder__info">
+            ${t("tire_rem_current", { type: curType, dims })}<br>
+            ${t("tire_rem_deadline", { date: formatDate(r.deadline) })}<br>
+            <strong>📅 ${timeLeftText(r.daysLeft)}</strong>
+          </div>
+        </div>
+      </div>`);
+  }
+
+  return `
+    <div class="dashboard-panel driver-notices">
+      <h3 class="panel-title">🔔 ${t("driver_notices_title")}${a ? ` — ${noticeEsc(a.vehicleBrand || "")} ${noticeEsc(a.vehicleModel || "")} <span class="upcoming-item__plate">${noticeEsc(a.vehiclePlate || "")}</span>` : ""}</h3>
+      ${items.length ? items.join("") : `<p class="empty-text">✅ ${t("driver_notices_none")}</p>`}
+    </div>`;
 }
 
 function renderAdminDashboard({ total, active, inService, unregistered, broken, inactive, upcomingReg, vehicles, assignedCount, upcomingScheduled, archivedCount, serviceReminders = [], tireReminders = [] }) {
@@ -526,10 +737,15 @@ function renderAdminDashboard({ total, active, inService, unregistered, broken, 
                   <div class="upcoming-item__main">
                     <span class="upcoming-item__name">${s.vehicleBrand} ${s.vehicleModel}</span>
                     <span class="upcoming-item__plate">${s.vehiclePlate}</span>
-                    ${s.workshop ? `<span class="upcoming-item__plate">🔧 ${s.workshop}</span>` : ""}
+                    ${s.workshop || s.workshopAddress ? `
+                      <div class="upcoming-item__place">
+                        ${s.workshop ? `<span class="upcoming-item__plate">🔧 ${s.workshop}</span>` : ""}
+                        ${s.workshopAddress ? `<span class="upcoming-item__addr">📍 ${s.workshopAddress}</span>` : ""}
+                      </div>` : ""}
                   </div>
                   <div class="upcoming-item__right">
                     <span class="upcoming-item__date">
+                      <span class="upcoming-item__time${s.serviceTime ? "" : " upcoming-item__time--missing"}" ${s.serviceTime ? "" : `title="${t("service_time_missing")}"`}>🕒 ${s.serviceTime || "—:—"}</span>
                       ${dateStr}
                       ${today_ ? `<span class="today-badge">${t("dashboard_today")}</span>` : ""}
                       ${overdueBadge}
@@ -592,7 +808,7 @@ async function loadActiveTrip(assignment) {
   }
 }
 
-function renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSnap, vehicles, resolvedActiveTrips) {
+function renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSnap, vehicles, resolvedActiveTrips, vehicleNotices = new Map()) {
   const activeAssignments = assignmentsSnap?.docs?.map(d => ({ id: d.id, ...d.data() })) || [];
   const allEntries        = allEntriesSnap?.docs?.map(d => ({ id: d.id, ...d.data() })) || [];
 
@@ -643,7 +859,16 @@ function renderDriverDashboard(assignmentsSnap, allAssignmentsSnap, allEntriesSn
   // unutar kartice ionako re-selektuje ispravno zaduženje.
   selectAssignment(activeAssignments[0].id);
 
-  return blocksHTML;
+  // Obaveštenja (istek registracije, servisi, gume...) idu na sam VRH
+  // dashboarda, iznad kartica zaduženja — po jedan blok za svako zaduženo vozilo.
+  const seenVehicles = new Set();
+  const noticesTop = activeAssignments.map(a => {
+    if (!a.vehicleId || seenVehicles.has(a.vehicleId)) return "";
+    seenVehicles.add(a.vehicleId);
+    return renderVehicleNotices(vehicleNotices.get(a.vehicleId), a);
+  }).join("");
+
+  return noticesTop + blocksHTML;
 }
 
 // ── AKTIVNO ZADUŽENJE: kartica vozila, km potvrda, statistike,

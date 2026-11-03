@@ -298,6 +298,9 @@ export function historyAssignmentCard(a, tripsByAssignment, entriesByTrip, entri
     return (dx?.getTime() || 0) - (dy?.getTime() || 0);
   });
 
+  // Vožnje se ovde računaju hronološki (Vožnja 1, 2, 3...), a prikazuju se
+  // OBRNUTO — najnovija/aktuelna vožnja je na vrhu liste (vidi render ispod).
+
   // Zaduženje bez zabeleženih pojedinačnih vožnji (npr. iz perioda pre
   // uvođenja koncepta "vožnji") — tretiraj celo zaduženje kao jednu vožnju,
   // da ništa ne "nestane" iz istorije.
@@ -359,7 +362,7 @@ export function historyAssignmentCard(a, tripsByAssignment, entriesByTrip, entri
             ? assignmentEntries
             : [...(entriesByTrip[trip.id] || []), ...(idx === 0 ? orphanEntries : [])];
           return tripHistoryCard(trip, entries, idx + 1, a.id);
-        }).join("")}
+        }).reverse().join("")}
       </div>
 
       <div class="assignment-history-summary">
