@@ -7,22 +7,37 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function userPath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function hasProfile() {
+      return isAuth() && exists(userPath());
+    }
+
     function getUserData() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+      return get(userPath()).data;
+    }
+
+    // Isto ponašanje kao app.js: pending / rejected / blocked nemaju nikakav
+    // pristup podacima firme; nalog bez polja status (stariji) važi kao aktivan.
+    function isActiveUser() {
+      return hasProfile()
+        && !(getUserData().get('status', 'active') in ['pending', 'rejected', 'blocked']);
     }
 
     function isMasterAdmin() {
-      return isAuth() && getUserData().role == 'master_admin';
+      return isActiveUser() && getUserData().role == 'master_admin';
     }
 
     function isFleetAdmin(companyId) {
-      return isAuth()
+      return isActiveUser()
         && getUserData().role == 'fleet_admin'
         && getUserData().companyId == companyId;
     }
 
     function isDriver(companyId) {
-      return isAuth()
+      return isActiveUser()
         && getUserData().role == 'driver'
         && getUserData().companyId == companyId;
     }
@@ -31,52 +46,133 @@ service cloud.firestore {
       return isFleetAdmin(companyId) || isDriver(companyId) || isMasterAdmin();
     }
 
+    // Poziv za fleet admina: invites/{email malim slovima}
+    function inviteExists() {
+      return isAuth()
+        && request.auth.token.email != null
+        && request.auth.token.email_verified == true
+        && exists(/databases/$(database)/documents/invites/$(request.auth.token.email.lower()));
+    }
+
+    function invite() {
+      return get(/databases/$(database)/documents/invites/$(request.auth.token.email.lower())).data;
+    }
+
+    // Polja koja korisnik sme sam da menja na svom profilu
+    // (nikada role, status, companyId, driverId, approvedBy...).
+    function selfEditableKeys() {
+      return ['firstName', 'lastName', 'displayName', 'phone', 'email',
+              'homeAddress', 'workAddress', 'preferredLang', 'username',
+              'lastCompanyId', 'updatedAt'];
+    }
+
     // ── KORISNICI ────────────────────────────────────────────
     match /users/{userId} {
-      allow read: if isAuth() && (request.auth.uid == userId || isMasterAdmin()
-        || (getUserData().role == 'fleet_admin'
-            && resource.data.companyId == getUserData().companyId));
-      allow create: if isMasterAdmin()
-        // Fleet admin kreira lokalne vozačke naloge
-        || (isAuth() && getUserData().role == 'fleet_admin')
-        // Novi korisnik kreira sopstveni profil pri registraciji
-        || (isAuth() && request.auth.uid == userId);
-      allow update: if isAuth() && (
+      allow read: if isAuth() && (
         request.auth.uid == userId
         || isMasterAdmin()
-        || (getUserData().role == 'fleet_admin'
-            && resource.data.companyId == getUserData().companyId
-            && resource.data.role == 'driver')
+        || (isActiveUser()
+            && getUserData().role == 'fleet_admin'
+            && resource.data.companyId == getUserData().companyId)
       );
+
+      allow create: if isAuth() && (
+        // 1) Master admin može sve (npr. ručno dodavanje fleet admina)
+        isMasterAdmin()
+
+        // 2) Samoregistracija: SAMO fleet_admin sa statusom pending
+        || (request.auth.uid == userId
+            && request.resource.data.role == 'fleet_admin'
+            && request.resource.data.status == 'pending'
+            && request.resource.data.keys().hasOnly([
+                 'role', 'status', 'companyId', 'firstName', 'lastName',
+                 'displayName', 'phone', 'email', 'homeAddress', 'workAddress',
+                 'googleEmail', 'photoURL', 'createdAt', 'joinExisting']))
+
+        // 3) Prijava po pozivu master admina: odmah aktivan, ali SAMO za firmu
+        //    i ulogu iz poziva i SAMO sa verifikovanim Google emailom iz poziva
+        || (request.auth.uid == userId
+            && inviteExists()
+            && request.resource.data.role == invite().role
+            && request.resource.data.companyId == invite().companyId
+            && request.resource.data.status == 'active'
+            && request.resource.data.role == 'fleet_admin'
+            && request.resource.data.keys().hasOnly([
+                 'role', 'status', 'companyId', 'firstName', 'lastName',
+                 'displayName', 'phone', 'email', 'googleEmail', 'photoURL',
+                 'createdAt', 'invitedBy']))
+
+        // 4) Fleet admin pravi profile vozača SAMO za svoju firmu
+        || (isFleetAdmin(request.resource.data.companyId)
+            && request.resource.data.role == 'driver'
+            && request.resource.data.companyId == getUserData().companyId)
+      );
+
+      allow update: if isAuth() && (
+        isMasterAdmin()
+
+        // Korisnik menja samo sopstvene "bezopasne" podatke
+        || (request.auth.uid == userId
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(selfEditableKeys()))
+
+        // Fleet admin menja samo vozače svoje firme i ne može da ih premesti
+        || (isActiveUser()
+            && getUserData().role == 'fleet_admin'
+            && resource.data.companyId == getUserData().companyId
+            && resource.data.role == 'driver'
+            && request.resource.data.role == 'driver'
+            && request.resource.data.companyId == resource.data.companyId)
+      );
+
       allow delete: if isMasterAdmin()
-        || (isAuth() && getUserData().role == 'fleet_admin'
+        || (isActiveUser()
+            && getUserData().role == 'fleet_admin'
             && resource.data.companyId == getUserData().companyId
             && resource.data.role == 'driver');
     }
 
+    // ── POZIVI ZA FLEET ADMINA (kreira master admin) ──────────
+    // ID dokumenta = email malim slovima, npr. invites/pera@gmail.com
+    match /invites/{email} {
+      allow read: if isMasterAdmin()
+        || (isAuth() && request.auth.token.email != null
+            && request.auth.token.email.lower() == email);
+      allow create, update: if isMasterAdmin()
+        && request.resource.data.role == 'fleet_admin'
+        && request.resource.data.companyId is string;
+      // Master briše; pozvani korisnik briše sopstveni poziv posle prijave
+      allow delete: if isMasterAdmin()
+        || (isAuth() && request.auth.token.email != null
+            && request.auth.token.email.lower() == email);
+    }
+
     // ── KOMPANIJE ────────────────────────────────────────────
     match /companies/{companyId} {
-      // Čitanje dozvoljeno svakom prijavljenom korisniku (ne samo članovima firme),
-      // jer je PIB/naziv/adresa javni podatak i ova provera je neophodna
-      // pri self-registraciji (provera da li firma već postoji po PIB-u),
-      // pre nego što korisnik uopšte ima users/{uid} dokument.
+      // Čitanje svim prijavljenim: potrebno za proveru PIB-a pri registraciji
+      // (vidi preporuku o pibIndex u objašnjenju).
       allow read: if isAuth();
-      // Fleet admin može kreirati firmu (self-registration)
-      allow create: if isAuth();
-      allow update: if isMasterAdmin() || isFleetAdmin(companyId);
+      // Firmu pravi samo prijavljeni korisnik i mora biti upisan kao autor
+      allow create: if isAuth()
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update: if isMasterAdmin()
+        || (isFleetAdmin(companyId)
+            && !request.resource.data.diff(resource.data).affectedKeys()
+                 .hasAny(['createdBy', 'createdAt']));
       allow delete: if isMasterAdmin();
 
       // ── VOZILA ────────────────────────────────────────────
       match /vehicles/{vehicleId} {
         allow read: if isCompanyMember(companyId);
-        allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
-        // Vozač može da update-uje currentKm (pri točenju) i da očisti
-        // assignedDriverName pri sopstvenom razduženju (samo na null)
-        allow update: if isDriver(companyId)
-          && request.resource.data.diff(resource.data).affectedKeys()
-              .hasOnly(['currentKm', 'currentKmUpdatedAt', 'updatedAt', 'assignedDriverName', 'fuelLevel'])
-          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['assignedDriverName'])
-              || request.resource.data.assignedDriverName == null);
+        allow create, delete: if isMasterAdmin() || isFleetAdmin(companyId);
+        allow update: if isMasterAdmin() || isFleetAdmin(companyId)
+          // Vozač može da update-uje currentKm (pri točenju) i da očisti
+          // assignedDriverName pri sopstvenom razduženju (samo na null)
+          || (isDriver(companyId)
+              && request.resource.data.diff(resource.data).affectedKeys()
+                   .hasOnly(['currentKm', 'currentKmUpdatedAt', 'updatedAt', 'assignedDriverName', 'fuelLevel'])
+              && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['assignedDriverName'])
+                  || request.resource.data.assignedDriverName == null));
       }
 
       // ── VOZAČI ────────────────────────────────────────────
@@ -88,27 +184,22 @@ service cloud.firestore {
       // ── ZADUŽENJA ─────────────────────────────────────────
       match /assignments/{assignmentId} {
         allow read: if isCompanyMember(companyId);
-        allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
-        // Vozač može da zatvori svoje zaduženje i update-uje km.
-        // Vlasništvo se proverava preko driverUid ILI driverId — jer za
-        // vozače sa Google loginom driverUid na zaduženju može biti prazan
-        // (postavlja se samo iz driver.localAuthUid), pa se u tom slučaju
-        // poklapanje mora raditi preko driverId (isto kao fallback u JS kodu).
-        allow update: if isDriver(companyId)
-          && (resource.data.driverUid == request.auth.uid
-              || (getUserData().get('driverId', null) != null
-                  && resource.data.get('driverId', null) == getUserData().get('driverId', null)))
-          && request.resource.data.diff(resource.data).affectedKeys()
-              .hasOnly(['status', 'endDate', 'endKm', 'kmMismatch',
-                        'driverStartKm', 'unassignNotes', 'closedByDriver', 'updatedAt',
-                        'kmConfirmed', 'kmConfirmedValue', 'kmConfirmedAt',
-                        'fuelLevel', 'fuelLevelConfirmedValue', 'fuelLevelMismatch',
-                        'systemFuelLevel']);
+        allow create, delete: if isMasterAdmin() || isFleetAdmin(companyId);
+        allow update: if isMasterAdmin() || isFleetAdmin(companyId)
+          // Vozač zatvara svoje zaduženje (preko driverUid ILI driverId)
+          || (isDriver(companyId)
+              && (resource.data.get('driverUid', null) == request.auth.uid
+                  || (getUserData().get('driverId', null) != null
+                      && resource.data.get('driverId', null) == getUserData().get('driverId', null)))
+              && request.resource.data.diff(resource.data).affectedKeys()
+                   .hasOnly(['status', 'endDate', 'endKm', 'kmMismatch',
+                             'driverStartKm', 'unassignNotes', 'closedByDriver', 'updatedAt',
+                             'kmConfirmed', 'kmConfirmedValue', 'kmConfirmedAt',
+                             'fuelLevel', 'fuelLevelConfirmedValue', 'fuelLevelMismatch',
+                             'systemFuelLevel']));
       }
 
       // ── VOŽNJE (trips) ────────────────────────────────────
-      // Ranije bez pravila → sve zabranjeno, pa vozač nije mogao da
-      // otvori/zatvori vožnju pri preuzimanju zaduženja.
       match /trips/{tripId} {
         allow read: if isCompanyMember(companyId);
         allow create: if isMasterAdmin() || isFleetAdmin(companyId)
@@ -121,13 +212,10 @@ service cloud.firestore {
       // ── TRIP ENTRIES (gorivo, putarine, prijave) ──────────
       match /tripEntries/{entryId} {
         allow read: if isCompanyMember(companyId);
-        // Unos sa brojem računa mora imati ID "r_" + receiptKey: isti račun
-        // tako ne može da se snimi dva puta (drugi create na istom ID-ju
-        // nije dozvoljen, a izmena tuđeg unosa je zabranjena pravilom ispod).
+        // Unos sa brojem računa mora imati ID "r_" + receiptKey (zaštita od duplikata)
         allow create: if isCompanyMember(companyId)
           && (request.resource.data.get('receiptKey', null) == null
               || entryId == 'r_' + request.resource.data.receiptKey);
-        // Vozač može brisati/menjati samo svoje unose
         allow update, delete: if isMasterAdmin() || isFleetAdmin(companyId)
           || (isDriver(companyId) && resource.data.driverUid == request.auth.uid);
       }
@@ -150,13 +238,13 @@ service cloud.firestore {
         allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
       }
 
-      // ── SERVISERI (kontakti servisa sa kojima sarađuje firma) ──
+      // ── SERVISERI ─────────────────────────────────────────
       match /serviceProviders/{providerId} {
         allow read: if isCompanyMember(companyId);
         allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
       }
 
-      // ── ZAKAZANI SERVISI ────────────────────────────────────
+      // ── ZAKAZANI SERVISI ──────────────────────────────────
       match /scheduledServices/{scheduleId} {
         allow read: if isCompanyMember(companyId);
         allow create, update, delete: if isMasterAdmin() || isFleetAdmin(companyId);
@@ -166,27 +254,44 @@ service cloud.firestore {
       match /notifications/{notifId} {
         allow read: if isCompanyMember(companyId);
         allow create: if isCompanyMember(companyId);
-        allow update: if isAuth()
-          && (isMasterAdmin() || isFleetAdmin(companyId)
-              || resource.data.recipientUid == request.auth.uid);
+        allow update: if isMasterAdmin() || isFleetAdmin(companyId)
+          || (isDriver(companyId) && resource.data.recipientUid == request.auth.uid);
         allow delete: if isMasterAdmin() || isFleetAdmin(companyId);
       }
     }
 
-    // ── USERNAME INDEKS (mapira username → interni auth email) ─
+    // ── USERNAME INDEKS (username → interni auth email) ───────
     match /usernameIndex/{username} {
       // Login ekran čita pre prijave, zato je čitanje javno
       allow read: if true;
-      allow create, update, delete: if isMasterAdmin()
-        || (isAuth() && getUserData().role == 'fleet_admin');
+      // Fleet admin sme da menja samo unose svoje firme. Stari unosi bez
+      // polja companyId ostaju izmenljivi (kompatibilnost) dok se ne
+      // ažuriraju; novi unosi treba da nose companyId.
+      allow create, update: if isMasterAdmin()
+        || (isActiveUser()
+            && getUserData().role == 'fleet_admin'
+            && request.resource.data.get('companyId', getUserData().companyId) == getUserData().companyId
+            && (!exists(/databases/$(database)/documents/usernameIndex/$(username))
+                || resource.data.get('companyId', getUserData().companyId) == getUserData().companyId));
+      allow delete: if isMasterAdmin()
+        || (isActiveUser()
+            && getUserData().role == 'fleet_admin'
+            && resource.data.get('companyId', getUserData().companyId) == getUserData().companyId);
     }
 
     // ── ADMIN NOTIFIKACIJE (pending zahtevi) ──────────────────
     match /adminNotifications/{notifId} {
-      allow read: if isAuth() && isMasterAdmin();
-      allow create: if isAuth();
-      allow update: if isAuth() && isMasterAdmin();
-      allow delete: if isAuth() && isMasterAdmin();
+      allow read, update, delete: if isMasterAdmin();
+      // Samo notifikacija o sopstvenoj registraciji
+      allow create: if isAuth()
+        && request.resource.data.userUid == request.auth.uid
+        && request.resource.data.type == 'pending_fleet_admin'
+        && request.resource.data.status == 'unread';
+    }
+
+    // Sve ostalo je zabranjeno
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

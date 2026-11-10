@@ -386,17 +386,22 @@ function parseJournal(raw) {
     .replace(/\s+/g, " ")
     .trim();
 
+  // Stavke: [naziv] cena količina ukupno. Tri uzastopna broja se prihvataju samo
+  // ako cena × količina ≈ ukupno (da se brojevi iz naziva, npr. "COLA 0,33", ne
+  // pomešaju sa cenom). Podržani: celobrojna količina, 2-4 decimale, negativne (popust).
+  const NUM_RE = /^-?(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?$/;
+  const tokens = block.split(" ").filter(Boolean);
   const items = [];
-  const re = /(.+?)\s+([\d.]*\d,\d{2})\s+([\d.]*\d,\d{1,3})\s+([\d.]*\d,\d{2})(?=\s|$)/g;
-  let m;
-  while ((m = re.exec(block))) {
-    items.push({
-      name: cleanItemName(m[1]),
-      tariff: tariffOf(m[1]),
-      unitPrice: parseNum(m[2]),
-      quantity: parseNum(m[3]),
-      total: parseNum(m[4]),
-    });
+  let nameStart = 0;
+  for (let i = 0; i + 2 < tokens.length; i++) {
+    const [a, b, c] = [tokens[i], tokens[i + 1], tokens[i + 2]];
+    if (i === nameStart || !NUM_RE.test(a) || !NUM_RE.test(b) || !NUM_RE.test(c)) continue;
+    const [unitPrice, quantity, total] = [parseNum(a), parseNum(b), parseNum(c)];
+    if (Math.abs(unitPrice * quantity - total) > Math.max(0.05, Math.abs(total) * 0.01)) continue;
+    const name = tokens.slice(nameStart, i).join(" ");
+    items.push({ name: cleanItemName(name), tariff: tariffOf(name), unitPrice, quantity, total });
+    nameStart = i + 3;
+    i += 2;
   }
 
   const tm = /Ukupan iznos\s*:\s*([\d.]*\d,\d{2})/i.exec(lines[iTotal]);

@@ -22,9 +22,10 @@ export async function renderProfile(container) {
   const isFleetAdmin= role === "fleet_admin";
   const isMaster    = role === "master_admin";
 
-  // Dohvati podatke o firmi
+  // Dohvati podatke o firmi (master admin nema veze sa firmama u profilu —
+  // njima upravlja iz glavnog menija „Firme“)
   let company = null;
-  if (S.companyId) {
+  if (S.companyId && !isMaster) {
     try {
       const snap = await getDoc(doc(db, "companies", S.companyId));
       if (snap.exists()) company = { id: snap.id, ...snap.data() };
@@ -246,7 +247,7 @@ function openEditProfileModal(profile, driverDoc) {
 function renderCompanyTab({ company, role }) {
   if (!company) return `<div class="empty-state"><p>${t("no_data")}</p></div>`;
 
-  const canEdit = role === "fleet_admin" || role === "master_admin";
+  const canEdit = role === "fleet_admin";
 
   return `
     <div class="profile-section">
@@ -270,7 +271,7 @@ function renderCompanyTab({ company, role }) {
 }
 
 function bindCompanyTab({ company, role }) {
-  if (role !== "fleet_admin" && role !== "master_admin") return;
+  if (role !== "fleet_admin") return;
   document.getElementById("btn-edit-company")?.addEventListener("click", () => {
     openEditCompanyModal(company);
   });
@@ -356,7 +357,7 @@ function openEditCompanyModal(company) {
 
 // ── TAB: PODEŠAVANJA ──────────────────────────────────────────
 function renderSettingsTab({ profile, company }) {
-  const canEditServiceSettings = !!company && (profile.role === "fleet_admin" || profile.role === "master_admin");
+  const canEditServiceSettings = !!company && profile.role === "fleet_admin";
   const svc = normalizeServiceSettings(company?.serviceSettings);
   const currentLang = getCurrentLang();
   const isLocalLogin = !!profile.username;
@@ -464,7 +465,7 @@ function bindSettingsTab({ profile, company }) {
     });
   });
 
-  // Podešavanja servisnog podsetnika (fleet_admin / master_admin)
+  // Podešavanja servisnog podsetnika (samo fleet_admin; master admin ih menja u „Firme“)
   document.getElementById("btn-save-service-settings")?.addEventListener("click", async () => {
     const val = (id) => document.getElementById(id)?.value;
     const intervalKm = Number(val("svc-interval-km"));

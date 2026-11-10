@@ -13,7 +13,18 @@ import { t, getCurrentLang, formatDateDMY } from "./i18n.js";
 
 // ── TIPOVI UNOSA ──────────────────────────────────────────────
 export const FUEL_TYPE  = "fuel";
-export const COST_TYPES = ["toll", "parking", "washing", "other_cost"];
+export const COST_TYPES = ["toll", "parking", "washing", "cosmetics", "adblue", "other_cost"];
+
+// Meta podaci tipova troška (ikona + ključ prevoda) — jedno mesto za sve prikaze.
+// "other_cost" je i dalje "Ostalo" (stari unosi se ne menjaju).
+export const COST_META = {
+  toll:       { icon: "🛣️", label: "trip_entry_toll" },
+  parking:    { icon: "🅿️", label: "trip_entry_parking" },
+  washing:    { icon: "🚿", label: "trip_entry_washing" },
+  cosmetics:  { icon: "🧴", label: "trip_entry_cosmetics" },
+  adblue:     { icon: "💧", label: "trip_entry_adblue" },
+  other_cost: { icon: "📋", label: "trip_entry_cost" },
+};
 export const EXPENSE_TYPES = [FUEL_TYPE, ...COST_TYPES];
 
 export function isExpenseEntry(e) {
@@ -55,8 +66,10 @@ export function sumEntries(entries = []) {
     toll: 0,    tollCount: 0,
     parking: 0, parkingCount: 0,
     washing: 0, washingCount: 0,
+    cosmetics: 0, cosmeticsCount: 0,
+    adblue: 0,    adblueCount: 0,
     other: 0,   otherCount: 0,
-    costsTotal: 0,   // toll + parking + washing + other (bez goriva)
+    costsTotal: 0,   // toll + parking + washing + cosmetics + adblue + other (bez goriva)
     total: 0,        // gorivo + svi ostali troškovi
   };
   for (const e of entries) {
@@ -67,10 +80,12 @@ export function sumEntries(entries = []) {
     } else if (e.type === "toll")       { s.toll    += Number(e.amount) || 0; s.tollCount++; }
     else if (e.type === "parking")      { s.parking += Number(e.amount) || 0; s.parkingCount++; }
     else if (e.type === "washing")      { s.washing += Number(e.amount) || 0; s.washingCount++; }
+    else if (e.type === "cosmetics")    { s.cosmetics += Number(e.amount) || 0; s.cosmeticsCount++; }
+    else if (e.type === "adblue")       { s.adblue += Number(e.amount) || 0; s.adblueCount++; }
     else if (e.type === "other_cost")   { s.other   += Number(e.amount) || 0; s.otherCount++; }
   }
   s.avgPricePerL = s.fuelL > 0 ? s.fuelCost / s.fuelL : 0;
-  s.costsTotal   = s.toll + s.parking + s.washing + s.other;
+  s.costsTotal   = s.toll + s.parking + s.washing + s.cosmetics + s.adblue + s.other;
   s.total        = s.fuelCost + s.costsTotal;
   return s;
 }
@@ -124,7 +139,7 @@ export function matchesFilter(item, filter) {
   if (item.kind !== "expense") return false;
   if (filter === "fuel")  return item.data.type === FUEL_TYPE;
   if (filter === "toll")  return item.data.type === "toll";
-  if (filter === "other") return ["parking", "washing", "other_cost"].includes(item.data.type);
+  if (filter === "other") return ["parking", "washing", "cosmetics", "adblue", "other_cost"].includes(item.data.type);
   return false;
 }
 
@@ -196,6 +211,8 @@ export function renderSummary(sums, opts = {}) {
       ${card("🛣️", t("entries_sum_toll"),    fmtRsd(sums.toll),    cnt(sums.tollCount))}
       ${card("🅿️", t("entries_sum_parking"), fmtRsd(sums.parking), cnt(sums.parkingCount))}
       ${card("🚿", t("entries_sum_washing"), fmtRsd(sums.washing), cnt(sums.washingCount))}
+      ${card("🧴", t("entries_sum_cosmetics"), fmtRsd(sums.cosmetics), cnt(sums.cosmeticsCount))}
+      ${card("💧", t("entries_sum_adblue"),  fmtRsd(sums.adblue),  cnt(sums.adblueCount))}
       ${card("📋", t("entries_sum_other"),   fmtRsd(sums.other),   cnt(sums.otherCount))}
       ${service ? card("🔧", t("entries_sum_service"), fmtRsd(service.cost), cnt(service.count)) : ""}
     </div>
@@ -233,7 +250,7 @@ export function monthlyRows(entries, services = []) {
     if (!b) return;
     if (e.type === FUEL_TYPE)            b.fuel  += Number(e.fuelCost) || 0;
     else if (e.type === "toll")          b.toll  += Number(e.amount) || 0;
-    else if (["parking", "washing", "other_cost"].includes(e.type)) b.other += Number(e.amount) || 0;
+    else if (["parking", "washing", "cosmetics", "adblue", "other_cost"].includes(e.type)) b.other += Number(e.amount) || 0;
   });
   services.forEach(s => {
     const b = bucket(toMillis(s.serviceDate));
@@ -304,10 +321,10 @@ export function renderMonthlyTable(rows, { withService = true } = {}) {
 // ── KOMPAKTAN RED ZA GORIVO / TROŠAK ──────────────────────────
 // opts: { showDriver, showPlate }
 export function expenseRow(e, { showDriver = false, showPlate = false } = {}) {
-  const icons = { fuel: "⛽", toll: "🛣️", parking: "🅿️", washing: "🚿", other_cost: "📋" };
+  const icons = { fuel: "⛽", ...Object.fromEntries(COST_TYPES.map(k => [k, COST_META[k].icon])) };
   const labels = {
-    fuel: t("trip_entry_fuel"), toll: t("trip_entry_toll"), parking: t("trip_entry_parking"),
-    washing: t("trip_entry_washing"), other_cost: t("trip_entry_cost"),
+    fuel: t("trip_entry_fuel"),
+    ...Object.fromEntries(COST_TYPES.map(k => [k, t(COST_META[k].label)])),
   };
 
   let main, sub = [];
@@ -322,6 +339,7 @@ export function expenseRow(e, { showDriver = false, showPlate = false } = {}) {
     }
   } else {
     main = `<strong>${fmtRsd(e.amount)}</strong>`;
+    if (e.merchant) sub.push(`🏪 ${esc(e.merchant)}`);
     if (e.location) sub.push(`📍 ${esc(e.location)}`);
   }
   if (e.currentKm)  sub.push(`🛣️ ${fmtNum(e.currentKm)} km`);

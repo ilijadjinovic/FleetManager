@@ -5,7 +5,7 @@
 //  Fleet admin / Master admin: pregled i upravljanje statusima
 // ============================================================
 
-import { db } from "./firebase.js";
+import { db, getVehicles, getDrivers } from "./firebase.js";
 import {
   collection, query, orderBy, getDocs, doc, getDoc,
   addDoc, updateDoc, serverTimestamp, where
@@ -13,6 +13,9 @@ import {
 import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
 import { S, showToast, openModal } from "./app.js";
 import { openServiceForm, incidentToServicePrefill } from "./vehicles.js";
+import { Timestamp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+import { attachDateMask, collectDates } from "./date-input.js";
+import { vehicleDriverDateHTML, readVehicleDriver, driverDisplayName, openAdminEntryForm } from "./entry-forms.js";
 
 // ── STANJE MODULA ─────────────────────────────────────────────
 let allIncidents  = [];
@@ -20,6 +23,8 @@ let filterType    = "all";
 let filterStatus  = "all";
 let searchTerm    = "";
 let onSavedCallback = null; // opcioni hook — poziva se posle uspešnog snimanja (npr. iz trips.js)
+let adminLists = null;       // { vehicles, drivers } — samo kad prijavu unosi admin
+let adminPreVehicleId = null;
 let formAssignmentId = null; // zaduženje za koje se trenutno otvorena forma prijave vezuje
 
 // ── GLAVNI RENDER ─────────────────────────────────────────────
@@ -36,12 +41,16 @@ export async function renderIncidents(container) {
   // može ih imati i više istovremeno (npr. dva vozila).
   const activeAssignments = isDriver ? await getDriverActiveAssignments() : [];
   const hasActiveAssignment = activeAssignments.length > 0;
-  const canReport = isDriver && hasActiveAssignment;
+  const canReport = isDriver ? hasActiveAssignment : true;   // admin uvek može da unese prijavu u ime vozača
 
   container.innerHTML = `
     <div class="page-header">
       <h2 class="page-title">${t("tab_report")}</h2>
       ${canReport ? `<button id="btn-add-incident" class="btn btn--warning btn--sm">⚠️ ${t("incident_add")}</button>` : ""}
+      ${!isDriver ? `
+        <button id="btn-admin-add-fuel" class="btn btn--primary btn--sm">⛽ ${t("admin_entry_fuel_add")}</button>
+        <button id="btn-admin-add-cost" class="btn btn--primary btn--sm">🧾 ${t("admin_entry_cost_add")}</button>
+      ` : ""}
     </div>
     ${isDriver && !hasActiveAssignment ? `
       <div class="no-login-notice" style="margin-bottom:12px">⚠️ ${t("incident_no_assignment_notice")}</div>
@@ -76,6 +85,8 @@ export async function renderIncidents(container) {
 
   // Vozač može da doda prijavu i odavde
   document.getElementById("btn-add-incident")?.addEventListener("click", () => openIncidentForm());
+  document.getElementById("btn-admin-add-fuel")?.addEventListener("click", () => openAdminEntryForm("fuel"));
+  document.getElementById("btn-admin-add-cost")?.addEventListener("click", () => openAdminEntryForm("cost"));
 
   // UI mora da prikaže zapamćene filtere/pretragu (npr. posle povratka iz detalja)
   document.querySelectorAll("[data-itype]").forEach(c =>
@@ -327,9 +338,25 @@ async function getDriverActiveAssignments() {
 //                     se ID tog zaduženja da prijava sigurno ide na to vozilo, bez nagađanja.
 //                     Ako nije prosleđen a vozač ima više aktivnih zaduženja, forma nudi
 //                     izbor vozila.
-export async function openIncidentForm(prefillType = null, onSaved = null, forcedAssignmentId = null) {
+export async function openIncidentForm(prefillType = null, onSaved = null, forcedAssignmentId = null, preVehicleId = null) {
+  adminPreVehicleId = preVehicleId;
   onSavedCallback = onSaved;
   formAssignmentId = forcedAssignmentId;
+
+  // Admin parka unosi prijavu u ime vozača: bira vozilo (obavezno), vozača
+  // (opciono) i datum; kilometraža je opciona i ne menja km vozila.
+  const adminMode = S.profile?.role !== "driver";
+  let adminPickerHTML = "";
+  adminLists = null;
+  if (adminMode) {
+    try {
+      adminLists = { vehicles: await getVehicles(S.companyId), drivers: await getDrivers(S.companyId) };
+      adminPickerHTML = vehicleDriverDateHTML("ai", adminLists.vehicles, adminLists.drivers, adminPreVehicleId);
+    } catch (e) {
+      showToast(`${t("error")}: ${e.message}`, "error");
+      return;
+    }
+  }
 
   // Predpopuni km polje i pripremi izbor vozila (ako vozač ima aktivno
   // zaduženje/zaduženja)
@@ -367,6 +394,7 @@ export async function openIncidentForm(prefillType = null, onSaved = null, force
   }
 
   const bodyHTML = `
+    ${adminPickerHTML}
     ${vehiclePickerHTML}
     <div class="form-section-title">${t("incident_type")}</div>
     <div class="incident-type-grid">
@@ -409,7 +437,7 @@ export async function openIncidentForm(prefillType = null, onSaved = null, force
           placeholder="${t('incident_location_ph')}" />
       </div>
       <div class="form-group">
-        <label class="form-label">${t("trip_current_km")} *</label>
+        <label class="form-label">${adminMode ? t("admin_entry_km_optional") : t("trip_current_km") + " *"}</label>
         <input id="inc-km" class="form-input" type="number"
           value="${prefillCurrentKm || ""}" placeholder="${t('trip_current_km')}" />
       </div>
@@ -438,6 +466,7 @@ export async function openIncidentForm(prefillType = null, onSaved = null, force
 
   // Prikaži dodatna polja za nezgodu
   setTimeout(() => {
+    if (adminMode) attachDateMask("ai-date");
     document.querySelectorAll("input[name='inc-type']").forEach(radio => {
       radio.addEventListener("change", () => {
         const accidentFields = document.getElementById("accident-fields");
@@ -477,15 +506,34 @@ async function saveIncident() {
   if (!description) {
     const err = document.getElementById("incident-form-error");
     if (err) { err.textContent = t("required_field") + ": " + t("incident_description"); err.classList.remove("hidden"); }
-    return;
+    return false;
+  }
+
+  let vehiclePlate = null, vehicleId = null, assignmentId = null, tripId = null,
+      driverId = null, vehicleCurrentKm = null, assignmentStartKm = null, adminDriverName = null;
+  const adminMode = S.profile?.role !== "driver";
+  let adminDate = null;
+  if (adminMode) {
+    const sel = readVehicleDriver("ai", adminLists?.vehicles || [], adminLists?.drivers || [], "incident-form-error");
+    if (!sel) return false;
+    const dres = collectDates([{ id: "ai-date", required: true }]);
+    if (!dres.ok) return false;
+    adminDate = dres.values["ai-date"];
+    if (adminDate > new Date()) {
+      const err = document.getElementById("incident-form-error");
+      if (err) { err.textContent = t("admin_entry_date_future"); err.classList.remove("hidden"); }
+      return false;
+    }
+    vehicleId    = sel.vehicle.id;
+    vehiclePlate = sel.vehicle.plate || null;
+    driverId     = sel.driver?.id || null;
+    adminDriverName = driverDisplayName(sel.driver);
   }
 
   // Dohvati IZABRANO aktivno zaduženje vozača (i vozilo, radi validacije km).
   // formAssignmentId je postavljen kad je forma otvorena — ili prosleđen
   // spolja (klik na konkretnu karticu vozila), ili automatski (jedno
   // aktivno zaduženje), ili izabran iz padajuće liste (više zaduženja).
-  let vehiclePlate = null, vehicleId = null, assignmentId = null, tripId = null,
-      driverId = null, vehicleCurrentKm = null, assignmentStartKm = null;
 
   if (S.profile?.role === "driver") {
     try {
@@ -529,17 +577,19 @@ async function saveIncident() {
 
   // Km je obavezna; ako imamo referentnu vrednost (vozilo/zaduženje), ne sme biti manja od nje
   const kmRaw = document.getElementById("inc-km")?.value;
-  const currentKm = parseFloat(kmRaw);
-  if (!kmRaw || isNaN(currentKm) || currentKm <= 0) {
+  const kmParsed = parseFloat(kmRaw);
+  // Admin: kilometraža je opciona (ne menja km vozila)
+  const currentKm = adminMode ? ((kmRaw && !isNaN(kmParsed) && kmParsed > 0) ? kmParsed : null) : kmParsed;
+  if (!adminMode && (!kmRaw || isNaN(currentKm) || currentKm <= 0)) {
     const err = document.getElementById("incident-form-error");
     if (err) { err.textContent = t("required_field") + ": " + t("trip_current_km"); err.classList.remove("hidden"); }
-    return;
+    return false;
   }
   const lastKm = vehicleCurrentKm ?? assignmentStartKm;
-  if (lastKm != null && currentKm < lastKm) {
+  if (!adminMode && lastKm != null && currentKm < lastKm) {
     const err = document.getElementById("incident-form-error");
     if (err) { err.textContent = `${t("trip_km_too_low")}: ${lastKm.toLocaleString()} km`; err.classList.remove("hidden"); }
-    return;
+    return false;
   }
 
   const data = {
@@ -552,8 +602,8 @@ async function saveIncident() {
     assignmentId,
     tripId,
     driverId,
-    driverUid:    S.user.uid,
-    driverName:   S.profile?.displayName || `${S.profile?.firstName || ""} ${S.profile?.lastName || ""}`.trim(),
+    driverUid:    adminMode ? null : S.user.uid,   // vozač ne sme da menja prijavu koju je uneo admin
+    driverName:   adminMode ? adminDriverName : (S.profile?.displayName || `${S.profile?.firstName || ""} ${S.profile?.lastName || ""}`.trim()),
     status:       "open",
     adminNote:    null,
     resolution:   null,
@@ -561,8 +611,14 @@ async function saveIncident() {
     thirdParty:   type === "accident" ? (document.getElementById("inc-thirdParty")?.value.trim() || null) : null,
     policeReport: type === "accident" ? (document.getElementById("inc-policeReport")?.value.trim() || null) : null,
     insurance:    type === "accident" ? (document.getElementById("inc-insurance")?.value.trim() || null) : null,
-    createdAt:    serverTimestamp(),
+    createdAt:    (adminMode && adminDate && adminDate.toDateString() !== new Date().toDateString())
+                    ? Timestamp.fromDate(new Date(adminDate.getFullYear(), adminDate.getMonth(), adminDate.getDate(), new Date().getHours(), new Date().getMinutes()))
+                    : serverTimestamp(),
     createdBy:    S.user.uid,
+    ...(adminMode ? {
+      reportedByAdmin: true,
+      enteredByName: S.profile?.displayName || `${S.profile?.firstName || ""} ${S.profile?.lastName || ""}`.trim() || S.user.email || null,
+    } : {}),
   };
 
   try {
@@ -575,8 +631,8 @@ async function saveIncident() {
 
     await Promise.all(writes);
 
-    // Ažuriraj km vozila na osnovu prijave
-    if (vehicleId) {
+    // Ažuriraj km vozila na osnovu prijave (samo kad prijavljuje vozač)
+    if (vehicleId && !adminMode && currentKm) {
       await updateDoc(doc(db, "companies", S.companyId, "vehicles", vehicleId), {
         currentKm: currentKm,
         currentKmUpdatedAt: serverTimestamp(),
@@ -584,8 +640,8 @@ async function saveIncident() {
       });
     }
 
-    // Notifikacija fleet adminu
-    await addDoc(collection(db, "companies", S.companyId, "notifications"), {
+    // Notifikacija fleet adminu (ne kad prijavu unosi sam admin)
+    if (!adminMode) await addDoc(collection(db, "companies", S.companyId, "notifications"), {
       type:         "incident",
       incidentType: type,
       vehiclePlate: vehiclePlate || "—",
@@ -609,6 +665,7 @@ async function saveIncident() {
   } catch (e) {
     const err = document.getElementById("incident-form-error");
     if (err) { err.textContent = `${t("error")}: ${e.message}`; err.classList.remove("hidden"); }
+    return false;
   }
 }
 

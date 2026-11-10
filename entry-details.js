@@ -18,14 +18,13 @@ import {
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import { t, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
 import { S, openModal } from "./app.js";
-import { esc, fmtNum, fmtRsd, toMillis } from "./entries-view.js";
+import { esc, fmtNum, fmtRsd, toMillis, COST_TYPES, COST_META } from "./entries-view.js";
 import {
   rememberEntry, rememberAssignment, rememberTrip,
   getRememberedEntry, getRememberedAssignment, getRememberedTrip,
 } from "./detail-registry.js";
 
-const COST_TYPES  = ["toll", "parking", "washing", "other_cost"];
-const ICONS  = { fuel: "⛽", toll: "🛣️", parking: "🅿️", washing: "🚿", other_cost: "📋",
+const ICONS  = { fuel: "⛽", ...Object.fromEntries(COST_TYPES.map(k => [k, COST_META[k].icon])),
                  fault: "🔧", damage: "💥", accident: "🚨", other: "📋" };
 
 export function isAdminViewer() {
@@ -40,8 +39,8 @@ export function canOpenEntryDetails() {
 
 function typeLabel(type) {
   const map = {
-    fuel: t("trip_entry_fuel"), toll: t("trip_entry_toll"), parking: t("trip_entry_parking"),
-    washing: t("trip_entry_washing"), other_cost: t("trip_entry_cost"),
+    fuel: t("trip_entry_fuel"),
+    ...Object.fromEntries(COST_TYPES.map(k => [k, t(COST_META[k].label)])),
   };
   if (map[type]) return map[type];
   const inc = t("incident_" + type);
@@ -144,6 +143,7 @@ export function entryDetailHTML(e) {
     [t("assignment_vehicle"), e.vehiclePlate],
     [t("assignment_driver"),  e.driverName ? driverLink(e.driverName, e.driverId) : null, true],
     [t("det_entered_at"),     dt(e.createdAt)],
+    [t("det_entered_by_admin"), e.enteredByAdmin ? (e.enteredByName || t("yes")) : null],
   ];
 
   if (e.type === "fuel") {
@@ -178,9 +178,21 @@ export function entryDetailHTML(e) {
       section(t("det_section_cost"), rows([
         [t("trip_cost_type").replace(" *", ""), typeLabel(e.type)],
         [t("trip_cost_amount").replace(" *", ""), e.amount != null ? fmtRsd(e.amount) : null],
+        [t("trip_cost_merchant"),   e.merchant],
         [t("trip_cost_location").replace(" *", ""), e.location],
-        [t("trip_fuel_receipt"),     e.receiptNo],
         [t("det_km_at_entry"),       km(e.currentKm)],
+      ])),
+      ...(Array.isArray(e.receiptItems) && e.receiptItems.length ? [
+        section(t("det_section_items"), rows(e.receiptItems.map(it => [
+          it.name || "—",
+          `${it.quantity != null ? fmtNum(it.quantity, 3) + " × " : ""}${it.total != null ? fmtRsd(it.total) : ""}`,
+        ]))),
+      ] : []),
+      section(t("det_section_receipt"), rows([
+        [t("trip_fuel_receipt"),      e.receiptNo],
+        [t("trip_fuel_receipt_time"), receiptDateTime(e.receiptTime)],
+        [t("det_receipt_link"),       safeReceiptLink(e.receiptUrl), true],
+        [t("det_receipt_source"),     e.receiptSource ? t(e.receiptSource === "qr" ? "det_source_qr" : "det_source_manual") : null],
       ])),
       section(t("det_section_entry"), rows([...common, [t("notes"), e.notes]])),
     ].join("");

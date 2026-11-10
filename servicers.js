@@ -13,6 +13,10 @@ import { S, showToast, openModal } from "./app.js";
 
 let allServicers = [];
 
+const esc = (v) => String(v ?? "")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
 // ── GLAVNI RENDER ─────────────────────────────────────────────
 export async function renderServicers(container) {
   if (!S.companyId) {
@@ -105,43 +109,45 @@ function renderList() {
 }
 
 // ── FORMA ZA UNOS/EDIT ────────────────────────────────────────
-function openServicerForm(servicer = null) {
+// opts.prefill: početne vrednosti za NOVOG servisera (npr. sa skeniranog računa)
+// opts.onSaved(id, data): poziva se posle uspešnog snimanja
+export function openServicerForm(servicer = null, opts = {}) {
   const isEdit = !!servicer;
-  const s = servicer || {};
+  const s = servicer || opts.prefill || {};
 
   const bodyHTML = `
     <div class="form-grid">
       <div class="form-group" style="grid-column:1/-1">
         <label class="form-label">${t("servicer_name")}</label>
-        <input id="sf-name" class="form-input" type="text" value="${s.name || ""}" placeholder="${t("servicer_name")}" />
+        <input id="sf-name" class="form-input" type="text" value="${esc(s.name)}" placeholder="${t("servicer_name")}" />
       </div>
       <div class="form-group" style="grid-column:1/-1">
         <label class="form-label">${t("servicer_address")}</label>
-        <input id="sf-address" class="form-input" type="text" value="${s.address || ""}" placeholder="Ulica i broj, grad" />
+        <input id="sf-address" class="form-input" type="text" value="${esc(s.address)}" placeholder="Ulica i broj, grad" />
       </div>
       <div class="form-group">
         <label class="form-label">${t("servicer_phone")}</label>
-        <input id="sf-phone" class="form-input" type="tel" value="${s.phone || ""}" placeholder="+381..." />
+        <input id="sf-phone" class="form-input" type="tel" value="${esc(s.phone)}" placeholder="+381..." />
       </div>
       <div class="form-group">
         <label class="form-label">${t("servicer_email")}</label>
-        <input id="sf-email" class="form-input" type="email" value="${s.email || ""}" placeholder="servis@example.com" />
+        <input id="sf-email" class="form-input" type="email" value="${esc(s.email)}" placeholder="servis@example.com" />
       </div>
       <div class="form-group">
         <label class="form-label">${t("servicer_pib")}</label>
-        <input id="sf-pib" class="form-input" type="text" value="${s.pib || ""}" />
+        <input id="sf-pib" class="form-input" type="text" value="${esc(s.pib)}" />
       </div>
       <div class="form-group">
         <label class="form-label">${t("servicer_mbr")}</label>
-        <input id="sf-mbr" class="form-input" type="text" value="${s.mbr || ""}" />
+        <input id="sf-mbr" class="form-input" type="text" value="${esc(s.mbr)}" />
       </div>
       <div class="form-group" style="grid-column:1/-1">
         <label class="form-label">${t("servicer_account")}</label>
-        <input id="sf-account" class="form-input" type="text" value="${s.account || ""}" placeholder="160-..." />
+        <input id="sf-account" class="form-input" type="text" value="${esc(s.account)}" placeholder="160-..." />
       </div>
       <div class="form-group" style="grid-column:1/-1">
         <label class="form-label">${t("notes")}</label>
-        <textarea id="sf-notes" class="form-input form-textarea" rows="2">${s.notes || ""}</textarea>
+        <textarea id="sf-notes" class="form-input form-textarea" rows="2">${esc(s.notes)}</textarea>
       </div>
     </div>
     <p id="servicer-form-error" class="login-error hidden"></p>
@@ -169,18 +175,21 @@ function openServicerForm(servicer = null) {
         notes:   document.getElementById("sf-notes")?.value.trim() || null,
       };
 
+      let newId = null;
       if (isEdit) {
         await updateDoc(doc(db, "companies", S.companyId, "serviceProviders", servicer.id), {
           ...data, updatedAt: serverTimestamp()
         });
       } else {
-        await addDoc(collection(db, "companies", S.companyId, "serviceProviders"), {
+        newId = (await addDoc(collection(db, "companies", S.companyId, "serviceProviders"), {
           ...data, createdAt: serverTimestamp()
-        });
+        })).id;
       }
 
       showToast(t("success"), "success");
-      await loadServicers();
+      // Lista servisera postoji na ekranu samo kad je otvoren tab "Serviseri"
+      if (document.getElementById("servicers-list")) await loadServicers();
+      if (opts.onSaved) await opts.onSaved(isEdit ? servicer.id : newId, data);
     }
   );
 }

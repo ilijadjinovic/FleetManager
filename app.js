@@ -3,7 +3,7 @@
 //  Glavni modul: auth state, routing, tab switching
 // ============================================================
 
-import { auth, getUserProfile, logout } from "./firebase.js";
+import { auth, getUserProfile, logout, acceptInviteIfAny } from "./firebase.js";
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-auth.js";
 import { loadLanguage, t, applyTranslations } from "./i18n.js";
 import { renderDashboard } from "./dashboard.js";
@@ -38,9 +38,19 @@ async function init() {
       S.profile = await getUserProfile(firebaseUser.uid);
 
       if (!S.profile) {
-        // Novi korisnik — prikaži registration formu
-        showRegistration();
-        return;
+        // Novi korisnik — prvo proveri da li ga je master admin pozvao
+        // (invites/{email}); ako jeste, odmah je aktivan fleet_admin firme.
+        try {
+          S.profile = await acceptInviteIfAny(firebaseUser);
+        } catch (e) {
+          console.warn("Prihvatanje poziva nije uspelo:", e?.code, e?.message);
+          S.profile = null;
+        }
+        if (!S.profile) {
+          // Nema poziva — prikaži registration formu
+          showRegistration();
+          return;
+        }
       }
 
       if (S.profile.status === "pending") {

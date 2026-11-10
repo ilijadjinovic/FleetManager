@@ -17,6 +17,7 @@ import {
   toDMY, datePlaceholder, attachDateMask, collectDates, setDateError
 } from "./date-input.js";
 import { DEJAVU_SANS_REGULAR_B64, DEJAVU_SANS_BOLD_B64 } from "./fonts-dejavu.js";
+import { COST_TYPES, COST_META } from "./entries-view.js";
 
 // ── FONT ZA SRPSKA SLOVA (š đ č ć ž) ───────────────────────────
 // jsPDF-ov ugradjeni "helvetica" font ne sadrzi ova slova (koristi
@@ -309,7 +310,7 @@ async function generateVehicleReport(allVehicles) {
       ]);
 
       const fuelings  = entries.filter(e => e.type === "fuel");
-      const costs     = entries.filter(e => ["toll","parking","washing","other_cost"].includes(e.type));
+      const costs     = entries.filter(e => COST_TYPES.includes(e.type));
 
       let y = drawHeader(pdf, company, from, to);
       y = drawVehicleSection(pdf, vehicle, y);
@@ -525,7 +526,7 @@ async function generateDriverReport(allDrivers) {
       ]);
 
       const fuelings = entries.filter(e => e.type === "fuel");
-      const costs    = entries.filter(e => ["toll","parking","washing","other_cost"].includes(e.type));
+      const costs    = entries.filter(e => COST_TYPES.includes(e.type));
 
       let y = drawHeader(pdf, company, from, to);
       y = drawDriverSection(pdf, driver, y);
@@ -977,10 +978,7 @@ function drawCostsSection(pdf, costs, y) {
 
   y = drawTableHeader(pdf, cols, y);
   costs.forEach((c, i) => {
-    const typeLabels = {
-      toll: t("trip_entry_toll"), parking: t("trip_entry_parking"),
-      washing: t("trip_entry_washing"), other_cost: t("trip_entry_cost"),
-    };
+    const typeLabels = Object.fromEntries(COST_TYPES.map(k => [k, t(COST_META[k].label)]));
     y = drawTableRow(pdf, cols, [
       formatDateSr(c.createdAt),
       typeLabels[c.type] || c.type,

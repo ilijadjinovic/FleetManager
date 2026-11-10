@@ -15,13 +15,17 @@ import {
   collectDates, setDateError, clearDateError
 } from "./date-input.js";
 import { S, showToast, openModal, closeModal } from "./app.js";
-import { getServiceProviders } from "./servicers.js";
+import { getServiceProviders, openServicerForm } from "./servicers.js";
+import { scanQRCode, parseFiscalQR, fetchReceiptDetails, receiptWorkerConfigured } from "./receipt-scan.js";
+import { findReceiptDuplicate, normalizeReceiptNo } from "./receipt-guard.js";
 import {
   effectiveServiceStatus, isServiceToday, isServiceOverdue, overdueDays, SERVICE_STATUS,
   getServiceSettings, getRegularServiceInfo, nextServiceSummary, shiftToWorkday, isWeekend,
   cleanVehicleServiceOverrides
 } from "./service-status.js";
-import { incidentCard, scheduleServiceForIncident } from "./incidents.js";
+import { incidentCard, scheduleServiceForIncident, openIncidentForm } from "./incidents.js";
+import { openAdminEntryForm } from "./entry-forms.js";
+import { COST_TYPES as COST_TYPES_V, COST_META as COST_META_V } from "./entries-view.js";
 import { detailButton, isAdminViewer } from "./entry-details.js";
 import { rememberEntry } from "./detail-registry.js";
 import { esc as escDet, fmtNum as fmtNumDet, fmtRsd as fmtRsdDet, toMillis as toMsDet } from "./entries-view.js";
@@ -699,7 +703,7 @@ function financeTotals(services, entries, from, to) {
 
   const sum = {
     fuelCount: 0, fuelL: 0, fuelCost: 0,
-    toll: 0, parking: 0, washing: 0, other: 0,
+    toll: 0, parking: 0, washing: 0, cosmetics: 0, adblue: 0, other: 0,
     serviceCount: 0, serviceCost: 0, servicePlanned: 0, serviceCancelled: 0,
   };
 
@@ -711,6 +715,8 @@ function financeTotals(services, entries, from, to) {
     } else if (e.type === "toll")       sum.toll    += Number(e.amount) || 0;
     else if (e.type === "parking")      sum.parking += Number(e.amount) || 0;
     else if (e.type === "washing")      sum.washing += Number(e.amount) || 0;
+    else if (e.type === "cosmetics")    sum.cosmetics += Number(e.amount) || 0;
+    else if (e.type === "adblue")       sum.adblue  += Number(e.amount) || 0;
     else if (e.type === "other_cost")   sum.other   += Number(e.amount) || 0;
   });
 
@@ -726,7 +732,7 @@ function financeTotals(services, entries, from, to) {
     }
   });
 
-  sum.total = sum.fuelCost + sum.toll + sum.parking + sum.washing + sum.other + sum.serviceCost;
+  sum.total = sum.fuelCost + sum.toll + sum.parking + sum.washing + sum.cosmetics + sum.adblue + sum.other + sum.serviceCost;
   return sum;
 }
 
@@ -756,6 +762,8 @@ function financeSummaryHTML(sum, from, to) {
       ${card("🛣️", t("trip_entry_toll"),    rsd(sum.toll))}
       ${card("🅿️", t("trip_entry_parking"), rsd(sum.parking))}
       ${card("🚿", t("trip_entry_washing"), rsd(sum.washing))}
+      ${card("🧴", t("trip_entry_cosmetics"), rsd(sum.cosmetics))}
+      ${card("💧", t("trip_entry_adblue"),  rsd(sum.adblue))}
       ${card("📋", t("trip_entry_cost"),    rsd(sum.other))}
       ${card("🔧", t("finance_services"),   rsd(sum.serviceCost),
           `${sum.serviceCount} ${t("finance_services_done")}${skipped.length ? " · " + t("finance_services_not_counted") + " (" + skipped.join(", ") + ")" : ""}`)}
@@ -773,10 +781,10 @@ function financeListHTML(services, entries, from, to) {
   const fromMs = from ? from.getTime() : -Infinity;
   const toMs   = to   ? to.getTime()   : Infinity;
   const inPeriod = (val) => { const ms = toMsDet(val); return ms && ms >= fromMs && ms <= toMs; };
-  const icons = { fuel: "⛽", toll: "🛣️", parking: "🅿️", washing: "🚿", other_cost: "📋" };
+  const icons = { fuel: "⛽", ...Object.fromEntries(COST_TYPES_V.map(k => [k, COST_META_V[k].icon])) };
   const labels = {
-    fuel: t("trip_entry_fuel"), toll: t("trip_entry_toll"), parking: t("trip_entry_parking"),
-    washing: t("trip_entry_washing"), other_cost: t("trip_entry_cost"),
+    fuel: t("trip_entry_fuel"),
+    ...Object.fromEntries(COST_TYPES_V.map(k => [k, t(COST_META_V[k].label)])),
   };
   const admin = isAdminViewer();
 
@@ -790,6 +798,7 @@ function financeListHTML(services, entries, from, to) {
     const sub = [
       isFuel && e.fuelType ? t("fuel_" + e.fuelType) : null,
       isFuel && e.fuelStation ? "🏪 " + e.fuelStation : null,
+      !isFuel && e.merchant ? "🏪 " + e.merchant : null,
       !isFuel && e.location ? "📍 " + e.location : null,
       e.receiptNo ? `${t("trip_fuel_receipt")}: ${e.receiptNo}` : null,
       e.driverName ? "👤 " + e.driverName : null,
@@ -858,7 +867,13 @@ async function loadFinanceTab(container, v) {
     const defaultFrom = new Date();
     defaultFrom.setDate(defaultFrom.getDate() - 30);
 
+    const canAddEntries = S.profile?.role !== "driver" && !v.archived;
     container.innerHTML = `
+      ${canAddEntries ? `
+        <div class="admin-entry-actions" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+          <button type="button" class="btn btn--primary btn--sm" id="btn-v-add-fuel">⛽ ${t("admin_entry_fuel_add")}</button>
+          <button type="button" class="btn btn--primary btn--sm" id="btn-v-add-cost">🧾 ${t("admin_entry_cost_add")}</button>
+        </div>` : ""}
       <div class="finance-period">
         <div class="form-row">
           <div class="form-group">
@@ -892,6 +907,11 @@ async function loadFinanceTab(container, v) {
 
     attachDateMask("fin-from");
     attachDateMask("fin-to");
+    if (canAddEntries) {
+      const reload = () => loadFinanceTab(container, v);
+      document.getElementById("btn-v-add-fuel")?.addEventListener("click", () => openAdminEntryForm("fuel", { vehicleId: v.id, onSaved: reload }));
+      document.getElementById("btn-v-add-cost")?.addEventListener("click", () => openAdminEntryForm("cost", { vehicleId: v.id, onSaved: reload }));
+    }
 
     const apply = () => {
       // Oba datuma su opciona: prazno "Od" = od početka, prazno "Do" = do danas i dalje
@@ -1057,9 +1077,14 @@ async function loadIncidentsTab(container, vehicle) {
     );
     const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-    container.innerHTML = items.length === 0
+    const addBtn = canEdit
+      ? `<div style="margin-bottom:12px"><button type="button" class="btn btn--warning btn--sm" id="btn-v-add-incident">⚠️ ${t("incident_add")}</button></div>`
+      : "";
+    container.innerHTML = addBtn + (items.length === 0
       ? `<div class="empty-state"><div class="empty-state__icon">⚠️</div><p>${t("no_data")}</p></div>`
-      : `<div class="incidents-list">${items.map(i => incidentCard(i, false, canEdit)).join("")}</div>`;
+      : `<div class="incidents-list">${items.map(i => incidentCard(i, false, canEdit)).join("")}</div>`);
+    document.getElementById("btn-v-add-incident")?.addEventListener("click", () =>
+      openIncidentForm(null, () => loadIncidentsTab(container, vehicle), null, vehicle.id));
 
     if (canEdit) {
       container.querySelectorAll(".btn-incident-schedule-service").forEach(btn => {
@@ -1788,6 +1813,319 @@ function confirmHardDeleteVehicle(vehicle) {
     .catch(e => showToast(`${t("error")}: ${e.message}`, "error"));
 }
 
+// ── SERVIS: SKENIRANJE RAČUNA + SERVISER ─────────────────────
+// Zajednički deo za formu "Dodaj servis" (prefiks "sf") i formu
+// "Servis završen" (prefiks "cs"). Skeniranjem QR koda računa popunjavaju se
+// iznos, broj i vreme računa, stavke (u opis) i serviser. Serviser se prvo traži
+// po PIB-u, pa po nazivu; ako ga nema na listi bira se "Drugo (unesi ručno)",
+// a posle snimanja servisa otvara se forma "Dodaj servisera" sa podacima sa računa.
+const $id = (id) => document.getElementById(id);
+
+// "Auto Servis Petrović d.o.o." → "auto servis petrovic"
+function normShopName(s) {
+  return String(s || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/gi, "dj")
+    .toLowerCase()
+    .replace(/(^|\s)(d\.?\s?o\.?\s?o\.?|a\.?\s?d\.?|doo|ad|pr|szr|sr)(?=\s|$)/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function matchServicer(servicers, pib, name) {
+  const p = String(pib || "").replace(/\D/g, "");
+  if (p) {
+    const byPib = servicers.find(sp => String(sp.pib || "").replace(/\D/g, "") === p);
+    if (byPib) return byPib;
+  }
+  const n = normShopName(name);
+  if (n.length < 4) return null;
+  return servicers.find(sp => {
+    const m = normShopName(sp.name);
+    if (m.length < 4) return false;
+    if (m === n) return true;
+    return m.length >= 6 && n.length >= 6 && (m.includes(n) || n.includes(m));
+  }) || null;
+}
+
+function workshopFieldsHTML(p, s, servicers) {
+  const other = !s.servicerId && s.workshop;
+  const addr = s.workshopAddress
+    || (s.servicerId ? (servicers.find(x => x.id === s.servicerId)?.address || "") : "");
+  return `
+    <div class="form-group">
+      <label class="form-label">${t("service_workshop")}</label>
+      <select id="${p}-workshop-select" class="form-select">
+        <option value="">${t("service_workshop_select_ph")}</option>
+        ${servicers.map(sp => `<option value="${escDet(sp.id)}" ${s.servicerId === sp.id ? "selected" : ""}>${escDet(sp.name)}</option>`).join("")}
+        <option value="__other__" ${other ? "selected" : ""}>${t("service_workshop_other")}</option>
+      </select>
+      <input id="${p}-workshop" class="form-input" type="text" style="margin-top:8px;display:${other ? "" : "none"}"
+        placeholder="${t("service_workshop")}" value="${escDet(other ? s.workshop : "")}" />
+    </div>
+    <div class="form-group">
+      <label class="form-label">${t("service_workshop_address")}</label>
+      <input id="${p}-workshop-address" class="form-input" type="text"
+        placeholder="${t("service_workshop_address_ph")}" value="${escDet(addr)}" />
+    </div>`;
+}
+
+function bindWorkshopSelect(p, servicers) {
+  // Prikaži slobodno polje samo kad je izabrano "Drugo"
+  $id(`${p}-workshop-select`)?.addEventListener("change", (e) => {
+    const freeInput = $id(`${p}-workshop`);
+    const addrInput = $id(`${p}-workshop-address`);
+    if (e.target.value === "__other__") {
+      if (freeInput) { freeInput.style.display = ""; freeInput.focus(); }
+    } else {
+      if (freeInput) { freeInput.style.display = "none"; freeInput.value = ""; }
+    }
+    // Izabran serviser iz liste → adresa iz njegove kartice (može se ručno ispraviti)
+    if (addrInput && e.target.value && e.target.value !== "__other__") {
+      addrInput.value = servicers.find(x => x.id === e.target.value)?.address || "";
+    }
+  });
+}
+
+function readWorkshop(p, servicers) {
+  const selectedId = $id(`${p}-workshop-select`)?.value || "";
+  let workshop = null;
+  let servicerId = null;
+  if (selectedId === "__other__") {
+    workshop = $id(`${p}-workshop`)?.value.trim() || null;
+  } else if (selectedId) {
+    const sp = servicers.find(x => x.id === selectedId);
+    workshop = sp?.name || null;
+    servicerId = selectedId;
+  }
+  // Adresa servisa — polje je predpopunjeno iz kartice servisera, ali se može ispraviti
+  const workshopAddress = $id(`${p}-workshop-address`)?.value.trim() || null;
+  return { selectedId, workshop, servicerId, workshopAddress };
+}
+
+function receiptBlockHTML(p, s = {}) {
+  return `
+    <button type="button" id="${p}-scan-btn" class="btn btn--secondary btn--full">${t("receipt_scan_btn")}</button>
+    <p id="${p}-scan-status" class="scan-status hidden"></p>
+    <div class="form-row">
+      <div class="form-group">
+        <label class="form-label">${t("service_receipt_no")}</label>
+        <input id="${p}-receiptNo" class="form-input" type="text" value="${escDet(s.receiptNo || "")}" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">${t("trip_fuel_receipt_time")}</label>
+        <input id="${p}-receiptTime" class="form-input" type="datetime-local" step="1" value="${escDet(s.receiptTime || "")}" />
+      </div>
+    </div>`;
+}
+
+// Vezuje dugme "Skeniraj račun". Vraća { state, read(receiptNo) }.
+function bindServiceReceipt(p, { servicers, existing = {}, ignoreId = null, costId, descId }) {
+  const state = {
+    url: existing.receiptUrl || null,
+    source: existing.receiptSource || "manual",
+    pib: existing.receiptPib || null,
+    items: existing.receiptItems || null,
+    scannedNow: false,          // true samo ako je račun skeniran u ovoj formi
+  };
+  let autoDesc = "";            // tekst koji je aplikacija sama upisala u opis
+
+  const btn = $id(`${p}-scan-btn`);
+  const setStatus = (msg, kind = "info") => {
+    const el = $id(`${p}-scan-status`);
+    if (!el) return;
+    el.textContent = msg;
+    el.className = `scan-status scan-status--${kind}`;
+  };
+  const setVal = (id, value) => {
+    const el = $id(id);
+    if (el && value !== null && value !== undefined && value !== "") el.value = value;
+  };
+
+  // Stavke sa računa → polje "Opis radova" (ne briše ono što je korisnik sam ukucao)
+  const fmt = (n) => Number(n).toLocaleString("sr-RS", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fillDesc = (items) => {
+    const el = $id(descId);
+    if (!el || !items.length) return;
+    const lines = items.map(it => {
+      const qty = it.quantity != null ? Number(it.quantity).toLocaleString("sr-RS", { maximumFractionDigits: 3 }) : "";
+      const price = it.unitPrice != null ? fmt(it.unitPrice) : "";
+      const tot = it.total != null ? fmt(it.total) : "";
+      return `• ${it.name || "—"}${qty ? ` — ${qty} × ${price}` : ""}${tot ? ` = ${tot}` : ""}`;
+    });
+    const text = `${t("receipt_items_label")}\n${lines.join("\n")}`;
+    const cur = el.value.trim();
+    if (!cur || cur === autoDesc) el.value = text;
+    else if (!cur.includes(text)) el.value = `${cur}\n\n${text}`;
+    autoDesc = text;
+  };
+
+  // Serviser sa računa → lista servisera, ili "Drugo (unesi ručno)" sa nazivom i adresom
+  const applyServicer = (r) => {
+    const name = r.chain || null;
+    const address = [r.address, r.city].filter(Boolean).join(", ") || null;
+    const sel = $id(`${p}-workshop-select`);
+    if (!sel || (!name && !r.pib)) return null;
+    const free = $id(`${p}-workshop`);
+    const addr = $id(`${p}-workshop-address`);
+    const match = matchServicer(servicers, r.pib, name);
+    if (match) {
+      sel.value = match.id;
+      if (free) { free.style.display = "none"; free.value = ""; }
+      if (addr) addr.value = match.address || address || "";
+      return match;
+    }
+    sel.value = "__other__";
+    if (free) { free.style.display = ""; free.value = name || ""; }
+    if (addr && address) addr.value = address;
+    return false;
+  };
+
+  btn?.addEventListener("click", async () => {
+    let text;
+    try {
+      text = await scanQRCode();
+    } catch (e) {
+      setStatus(t(e.code === "denied" ? "receipt_scan_camera_denied" : "receipt_scan_camera_unavailable"), "error");
+      return;
+    }
+    if (text === null) return; // skener zatvoren
+
+    const qr = parseFiscalQR(text);
+    if (!qr) { setStatus(t("receipt_scan_not_fiscal"), "error"); return; }
+
+    try {
+      const dup = await findReceiptDuplicate(S.companyId, qr.pfr, { ignoreId });
+      if (dup) {
+        const when = dup.createdAt?.toDate ? dup.createdAt.toDate().toLocaleDateString("sr-RS") : "—";
+        const who = [dup.driverName, dup.vehiclePlate].filter(Boolean).join(", ") || "—";
+        setStatus(t("receipt_duplicate_detail", { pfr: qr.pfr, date: when, who }), "error");
+        return;
+      }
+    } catch (e) {
+      console.warn("Provera duplikata računa nije uspela:", e);
+      setStatus(t("receipt_check_failed"), "error");
+      return;
+    }
+
+    // Podaci iz samog QR koda (rade i bez Worker-a)
+    state.url = text.trim();
+    state.source = "qr";
+    state.scannedNow = true;
+    setVal(`${p}-receiptNo`, qr.pfr);
+    setVal(costId, qr.amount);
+    setVal(`${p}-receiptTime`, qr.dateTime);
+
+    if (!receiptWorkerConfigured()) { setStatus(t("svc_receipt_qr_only"), "warn"); return; }
+
+    setStatus(t("receipt_scan_loading"), "info");
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetchReceiptDetails(state.url);
+      const items = (r.items || []).map(it => ({
+        name: it.name || null,
+        quantity: it.quantity ?? null,
+        unitPrice: it.unitPrice ?? null,
+        total: it.total ?? null,
+      }));
+      state.pib = r.pib || null;
+      state.items = items.length ? items : null;
+      setVal(`${p}-receiptTime`, r.time);
+      if (r.total > 0) setVal(costId, r.total);
+      fillDesc(items);
+      const match = applyServicer(r);
+
+      const notes = [t("svc_receipt_ok")];
+      if (match) notes.push(t("svc_receipt_servicer_matched", { name: match.name }));
+      else if (match === false) notes.push(t("svc_receipt_servicer_new"));
+      let warn = match === false;
+      if (r.total > 0 && Math.abs(r.total - qr.amount) > 0.01) {
+        notes.push(t("receipt_scan_total_mismatch", { a: r.total.toFixed(2), b: qr.amount.toFixed(2) }));
+        warn = true;
+      }
+      setStatus(notes.join(" "), warn ? "warn" : "ok");
+    } catch (e) {
+      console.warn("Učitavanje računa nije uspelo:", e.message, e.diag || "");
+      setStatus(`${t("svc_receipt_qr_only")} (${e.message})`, "warn");
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  });
+
+  return {
+    state,
+    // Polja računa za snimanje u servisni zapis (receiptNo je već normalizovan)
+    read(receiptNo) {
+      const has = !!(receiptNo || state.url);
+      return {
+        receiptNo:     receiptNo || null,
+        receiptTime:   $id(`${p}-receiptTime`)?.value || null,
+        receiptUrl:    state.url || null,
+        receiptSource: has ? state.source : null,
+        receiptPib:    state.pib || null,
+        receiptItems:  state.items && state.items.length ? state.items : null,
+      };
+    },
+  };
+}
+
+// Normalizuje broj računa i proverava da isti račun nije već unet
+// (troškovi, gorivo ili drugi servis). Vraća { ok, receiptNo }.
+async function checkServiceReceipt(p, ignoreId) {
+  const norm = normalizeReceiptNo($id(`${p}-receiptNo`)?.value);
+  if (!norm) return { ok: true, receiptNo: null };
+  try {
+    const dup = await findReceiptDuplicate(S.companyId, norm, { ignoreId });
+    if (dup) {
+      const when = dup.createdAt?.toDate ? dup.createdAt.toDate().toLocaleDateString("sr-RS") : "—";
+      const who = [dup.driverName, dup.vehiclePlate].filter(Boolean).join(", ") || "—";
+      showToast(t("receipt_duplicate_detail", { pfr: norm, date: when, who }), "error");
+      return { ok: false };
+    }
+  } catch (e) {
+    console.warn("Provera duplikata računa nije uspela:", e);
+    showToast(t("receipt_check_failed"), "error");
+    return { ok: false };
+  }
+  return { ok: true, receiptNo: norm };
+}
+
+// Serviser sa skeniranog računa koji nije na listi → podaci za formu "Dodaj servisera"
+function pendingServicerFrom(w, scanner) {
+  if (!scanner.state.scannedNow || w.selectedId !== "__other__") return null;
+  if (!w.workshop && !scanner.state.pib) return null;
+  return { name: w.workshop || "", address: w.workshopAddress || "", pib: scanner.state.pib || "" };
+}
+
+// Posle zatvaranja forme servisa otvara "Dodaj servisera" sa unapred popunjenim
+// podacima; kad se serviser snimi, servis se povezuje sa njim (servicerId).
+function offerNewServicer(pending, serviceId, vehicle, options = {}) {
+  if (!pending || !serviceId) return;
+  // Odloženo: openModal posle uspešnog snimanja zatvara trenutni dijalog
+  setTimeout(() => {
+    openServicerForm(null, {
+      prefill: pending,
+      onSaved: async (newId, sp) => {
+        try {
+          await updateDoc(doc(db, "companies", S.companyId, "services", serviceId), {
+            servicerId: newId,
+            workshop: sp.name,
+            workshopAddress: sp.address || pending.address || null,
+            updatedAt: serverTimestamp(),
+          });
+        } catch (e) {
+          showToast(`${t("error")}: ${e.message}`, "error");
+        }
+        if (options.onSaved) options.onSaved();
+        else {
+          const content = document.getElementById("vehicle-tab-content");
+          if (content) loadServiceTab(content, vehicle);
+        }
+      },
+    });
+  }, 250);
+}
+
 // ── SERVIS FORMA (dodavanje / editovanje) ────────────────────
 // Eksportovano — koristi ga i incidents.js/drivers.js za zakazivanje
 // servisa direktno iz prijave (dugme "Zakaži servis").
@@ -1800,6 +2138,7 @@ export async function openServiceForm(vehicle, service = null, prefill = null, o
   const isEdit = !!service;
   const s = service || prefill || {};
   const servicers = await getServiceProviders();
+  let scanner = null;   // vezuje se posle openModal (skener računa)
 
   const bodyHTML = `
     <div class="form-group">
@@ -1829,6 +2168,7 @@ export async function openServiceForm(vehicle, service = null, prefill = null, o
       </label>
     </div>
     ` : ""}
+    ${receiptBlockHTML("sf", s)}
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">${t("service_km")}</label>
@@ -1839,22 +2179,7 @@ export async function openServiceForm(vehicle, service = null, prefill = null, o
         <input id="sf-cost" class="form-input" type="number" value="${s.cost ?? ""}" />
       </div>
     </div>
-    <div class="form-group">
-      <label class="form-label">${t("service_workshop")}</label>
-      <select id="sf-workshop-select" class="form-select">
-        <option value="">${t("service_workshop_select_ph")}</option>
-        ${servicers.map(sp => `<option value="${sp.id}" ${s.servicerId === sp.id ? "selected" : ""}>${sp.name}</option>`).join("")}
-        <option value="__other__" ${!s.servicerId && s.workshop ? "selected" : ""}>${t("service_workshop_other")}</option>
-      </select>
-      <input id="sf-workshop" class="form-input" type="text" style="margin-top:8px;display:${!s.servicerId && s.workshop ? "" : "none"}"
-        placeholder="${t("service_workshop")}" value="${!s.servicerId && s.workshop ? s.workshop : ""}" />
-    </div>
-    <div class="form-group">
-      <label class="form-label">${t("service_workshop_address")}</label>
-      <input id="sf-workshop-address" class="form-input" type="text"
-        placeholder="${t("service_workshop_address_ph")}"
-        value="${s.workshopAddress || (s.servicerId ? (servicers.find(x => x.id === s.servicerId)?.address || "") : "")}" />
-    </div>
+    ${workshopFieldsHTML("sf", s, servicers)}
     <div class="form-group">
       <label class="form-label">${t("service_description")}</label>
       <textarea id="sf-desc" class="form-textarea">${s.description || ""}</textarea>
@@ -1909,18 +2234,10 @@ export async function openServiceForm(vehicle, service = null, prefill = null, o
         weekendShifted = true;
       }
 
-      const selectedId = document.getElementById("sf-workshop-select")?.value || "";
-      let workshop = null;
-      let servicerId = null;
-      if (selectedId === "__other__") {
-        workshop = document.getElementById("sf-workshop")?.value.trim() || null;
-      } else if (selectedId) {
-        const sp = servicers.find(x => x.id === selectedId);
-        workshop = sp?.name || null;
-        servicerId = selectedId;
-      }
-      // Adresa servisa — polje je predpopunjeno iz kartice servisera, ali se može ispraviti
-      const workshopAddress = document.getElementById("sf-workshop-address")?.value.trim() || null;
+      const w = readWorkshop("sf", servicers);
+      const { workshop, servicerId, workshopAddress } = w;
+      const rc = await checkServiceReceipt("sf", isEdit ? service.id : null);
+      if (!rc.ok) return false;
       // Vreme (HH:MM) se čuva zasebno od datuma — serviceDate ostaje ponoć,
       // pa se statusi, vikend-pomeranje i izveštaji ne menjaju.
       const serviceTime = (document.getElementById("sf-time")?.value || "").trim() || null;
@@ -1939,8 +2256,10 @@ export async function openServiceForm(vehicle, service = null, prefill = null, o
         description:  document.getElementById("sf-desc")?.value.trim() || null,
         endDate:      dateOrNull("sf-endDate"),
         endKm:        numOrNull("sf-endKm"),
+        ...scanner.read(rc.receiptNo),
       };
 
+      let savedServiceId = isEdit ? service.id : null;
       if (isEdit) {
         await updateDoc(doc(db, "companies", S.companyId, "services", service.id), {
           ...data, updatedAt: serverTimestamp(),
@@ -1954,9 +2273,10 @@ export async function openServiceForm(vehicle, service = null, prefill = null, o
         const alreadyDone = document.getElementById("sf-already-done")?.checked || false;
         data.status = alreadyDone ? SERVICE_STATUS.DONE : SERVICE_STATUS.PLANNED;
 
-        await addDoc(collection(db, "companies", S.companyId, "services"), {
+        const newRef = await addDoc(collection(db, "companies", S.companyId, "services"), {
           ...data, createdBy: S.user.uid, createdAt: serverTimestamp(),
         });
+        savedServiceId = newRef.id;
 
         // Servis zakazan iz prijave — prijava prelazi u status "u obradi"
         if (options.linkedIncidentId) {
@@ -1988,6 +2308,9 @@ export async function openServiceForm(vehicle, service = null, prefill = null, o
         const content = document.getElementById("vehicle-tab-content");
         if (content) loadServiceTab(content, vehicle);
       }
+
+      // Serviser sa računa nije na listi → otvori formu "Dodaj servisera" sa podacima sa računa
+      offerNewServicer(pendingServicerFrom(w, scanner), savedServiceId, vehicle, options);
     } catch (e) {
       showToast(`${t("error")}: ${e.message}`, "error");
     }
@@ -2005,19 +2328,10 @@ export async function openServiceForm(vehicle, service = null, prefill = null, o
     clearDateError(el);
   });
 
-  // Prikaži slobodno polje samo kad je izabrano "Drugo"
-  document.getElementById("sf-workshop-select")?.addEventListener("change", (e) => {
-    const freeInput = document.getElementById("sf-workshop");
-    const addrInput = document.getElementById("sf-workshop-address");
-    if (e.target.value === "__other__") {
-      if (freeInput) { freeInput.style.display = ""; freeInput.focus(); }
-    } else {
-      if (freeInput) { freeInput.style.display = "none"; freeInput.value = ""; }
-    }
-    // Izabran serviser iz liste → adresa iz njegove kartice (može se ručno ispraviti)
-    if (addrInput && e.target.value && e.target.value !== "__other__") {
-      addrInput.value = servicers.find(x => x.id === e.target.value)?.address || "";
-    }
+  bindWorkshopSelect("sf", servicers);
+  scanner = bindServiceReceipt("sf", {
+    servicers, existing: s, ignoreId: isEdit ? service.id : null,
+    costId: "sf-cost", descId: "sf-desc",
   });
 }
 
@@ -2044,8 +2358,14 @@ async function markServiceTaken(vehicle, service) {
 }
 
 // ── SERVIS ZAVRŠEN ────────────────────────────────────────────
-function openCompleteServiceModal(vehicle, service) {
+// Uz završetak može da se skenira račun: iznos, serviser i podaci računa
+// upisuju se u servisni zapis.
+async function openCompleteServiceModal(vehicle, service) {
+  const servicers = await getServiceProviders();
+  let scanner = null;
+
   const bodyHTML = `
+    ${receiptBlockHTML("cs", service)}
     <div class="form-row">
       <div class="form-group">
         <label class="form-label">${t("service_end_date")}</label>
@@ -2057,17 +2377,36 @@ function openCompleteServiceModal(vehicle, service) {
         <input id="cs-endKm" class="form-input" type="number" value="${vehicle.currentKm || ""}" />
       </div>
     </div>
+    <div class="form-group">
+      <label class="form-label">${t("service_cost")}</label>
+      <input id="cs-cost" class="form-input" type="number" value="${service.cost ?? ""}" />
+    </div>
+    ${workshopFieldsHTML("cs", service, servicers)}
+    <div class="form-group">
+      <label class="form-label">${t("service_description")}</label>
+      <textarea id="cs-desc" class="form-textarea">${escDet(service.description || "")}</textarea>
+    </div>
   `;
 
   openModal(t("service_complete_title"), bodyHTML, async () => {
     const csDates = collectDates([{ id: "cs-endDate" }]);
     if (!csDates.ok) return false; // dijalog ostaje otvoren, poruka je ispod polja
     try {
+      const rc = await checkServiceReceipt("cs", service.id);
+      if (!rc.ok) return false;
+      const w = readWorkshop("cs", servicers);
       const endKm = numOrNull("cs-endKm");
       await updateDoc(doc(db, "companies", S.companyId, "services", service.id), {
         status: SERVICE_STATUS.DONE,
         endDate: dateOrNull("cs-endDate"),
         endKm,
+        cost: numOrNull("cs-cost"),
+        workshop: w.workshop,
+        workshopAddress: w.workshopAddress,
+        servicerId: w.servicerId,
+        description: $id("cs-desc")?.value.trim() || null,
+        ...scanner.read(rc.receiptNo),
+        updatedAt: serverTimestamp(),
       });
       const vehicleUpdate = {
         status: service.previousVehicleStatus || "active",
@@ -2088,12 +2427,20 @@ function openCompleteServiceModal(vehicle, service) {
       showToast(t("success"), "success");
       const content = document.getElementById("vehicle-tab-content");
       if (content) loadServiceTab(content, vehicle);
+
+      // Serviser sa računa nije na listi → otvori formu "Dodaj servisera"
+      offerNewServicer(pendingServicerFrom(w, scanner), service.id, vehicle);
     } catch (e) {
       showToast(`${t("error")}: ${e.message}`, "error");
     }
   });
 
   attachDateMask("cs-endDate");
+  bindWorkshopSelect("cs", servicers);
+  scanner = bindServiceReceipt("cs", {
+    servicers, existing: service, ignoreId: service.id,
+    costId: "cs-cost", descId: "cs-desc",
+  });
 }
 
 // ── OTKAZIVANJE SERVISA ───────────────────────────────────────

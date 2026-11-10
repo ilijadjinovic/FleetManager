@@ -149,6 +149,50 @@ export async function getUserProfile(uid) {
   return snap.exists() ? { id: snap.id, ...snap.data() } : null;
 }
 
+/**
+ * Prijava po pozivu master admina (invites/{email}).
+ * Ako novi korisnik (bez profila) ima verifikovan Google email za koji postoji
+ * poziv, odmah mu se pravi aktivan fleet_admin profil za firmu iz poziva
+ * (bez čekanja na odobrenje), a poziv se briše. Vraća profil ili null.
+ */
+export async function acceptInviteIfAny(user) {
+  const email = (user?.email || "").toLowerCase();
+  if (!email || !user.emailVerified) return null;
+
+  const inviteRef = doc(db, "invites", email);
+  const inviteSnap = await getDoc(inviteRef);
+  if (!inviteSnap.exists()) return null;
+
+  const inv = inviteSnap.data();
+  if (inv.role !== "fleet_admin" || !inv.companyId) return null;
+
+  // Firma mora i dalje da postoji
+  const companySnap = await getDoc(doc(db, "companies", inv.companyId));
+  if (!companySnap.exists()) return null;
+
+  const parts     = (user.displayName || "").trim().split(/\s+/);
+  const firstName = inv.firstName || parts[0] || "";
+  const lastName  = inv.lastName  || parts.slice(1).join(" ") || "";
+
+  await setDoc(doc(db, "users", user.uid), {
+    role:        "fleet_admin",
+    status:      "active",
+    companyId:   inv.companyId,
+    firstName,
+    lastName,
+    displayName: `${firstName} ${lastName}`.trim(),
+    phone:       inv.phone || null,
+    email:       user.email,
+    googleEmail: user.email,
+    photoURL:    user.photoURL || null,
+    invitedBy:   inv.invitedBy || null,
+    createdAt:   serverTimestamp(),
+  });
+
+  try { await deleteDoc(inviteRef); } catch (_) { /* poziv će master obrisati ručno */ }
+  return getUserProfile(user.uid);
+}
+
 /** Kreiraj ili ažuriraj korisnikov profil */
 export async function setUserProfile(uid, data) {
   const ref = doc(db, "users", uid);

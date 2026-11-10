@@ -6,7 +6,7 @@
 import { db, auth } from "./firebase.js";
 import {
   collection, query, orderBy, getDocs, doc, getDoc, setDoc,
-  addDoc, updateDoc, deleteDoc, serverTimestamp, where
+  addDoc, updateDoc, deleteDoc, deleteField, serverTimestamp, where
 } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 import {
   createUserWithEmailAndPassword,
@@ -676,6 +676,7 @@ async function saveDriver(driverId, existingDriver) {
     const hasExistingLocalAuth = !!(existingDriver?.localAuthUid);
     const passwordChanged = isEdit && username && password;
     let oldUsersDocToDelete = null;
+    let shownPassword = null;   // prikazuje se adminu JEDNOM; ne upisuje se u bazu
 
     // ── VALIDACIJA JEDINSTVENOSTI JMBG (pre kreiranja Auth naloga!) ──
     if (data.jmbg && data.jmbg !== existingDriver?.jmbg) {
@@ -698,7 +699,7 @@ async function saveDriver(driverId, existingDriver) {
       const cred = await createUserWithEmailAndPassword(secondaryAuth, email, password);
       undo.push(() => cred.user.delete());
       data.localAuthUid    = cred.user.uid;
-      data.lastSetPassword = password;
+      shownPassword = password;
       return cred;
     };
 
@@ -711,6 +712,7 @@ async function saveDriver(driverId, existingDriver) {
       // Javno-čitljivi indeks: login ekran preko njega nalazi auth email za username
       await setDoc(doc(db, "usernameIndex", username), {
         authEmail: fakeEmail,
+        companyId: S.companyId,
         updatedAt: serverTimestamp(),
       });
       undo.push(() => deleteDoc(doc(db, "usernameIndex", username)));
@@ -723,6 +725,7 @@ async function saveDriver(driverId, existingDriver) {
       await createAuthAccount(fakeEmail);
       await setDoc(doc(db, "usernameIndex", username), {
         authEmail: fakeEmail,
+        companyId: S.companyId,
         updatedAt: serverTimestamp(),
       });
       undo.push(() => deleteDoc(doc(db, "usernameIndex", username)));
@@ -739,11 +742,13 @@ async function saveDriver(driverId, existingDriver) {
       const previousEmail = existingDriver.localAuthEmail || fakeEmail;
       await setDoc(doc(db, "usernameIndex", username), {
         authEmail: newEmail,
+        companyId: S.companyId,
         updatedAt: serverTimestamp(),
       });
       // Ako snimanje pukne, indeks se vraća na stari email
       undo.push(() => setDoc(doc(db, "usernameIndex", username), {
         authEmail: previousEmail,
+        companyId: S.companyId,
         updatedAt: serverTimestamp(),
       }));
       oldUsersDocToDelete = existingDriver.localAuthUid;
@@ -753,7 +758,6 @@ async function saveDriver(driverId, existingDriver) {
     if (isEdit && username && !password && hasExistingLocalAuth) {
       data.localAuthUid    = existingDriver.localAuthUid;
       data.localAuthEmail  = existingDriver.localAuthEmail;
-      data.lastSetPassword = existingDriver.lastSetPassword;
     }
 
     // ── SNIMI U FIRESTORE ─────────────────────────────────────
@@ -762,7 +766,7 @@ async function saveDriver(driverId, existingDriver) {
     if (isEdit) {
       await updateDoc(
         doc(db, "companies", S.companyId, "drivers", driverId),
-        { ...data, updatedAt: serverTimestamp() }
+        { ...data, lastSetPassword: deleteField(), updatedAt: serverTimestamp() }
       );
     } else {
       console.log("[saveDriver] addDoc - snimam vozača u Firestore...", { companyId: S.companyId, data });
@@ -804,8 +808,8 @@ async function saveDriver(driverId, existingDriver) {
     if (container) renderDrivers(container);
 
     // ── PRIKAŽI NOVI PASSWORD ADMINU (ako je promenjen) ───────
-    if (data.lastSetPassword && ((!isEdit && username) || passwordChanged)) {
-      showPasswordDialog(firstName, lastName, username, data.lastSetPassword);
+    if (shownPassword && ((!isEdit && username) || passwordChanged)) {
+      showPasswordDialog(firstName, lastName, username, shownPassword);
     } else {
       showToast(t("success"), "success");
     }

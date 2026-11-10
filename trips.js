@@ -14,6 +14,7 @@ import { t, getCurrentLang, formatDateDMY, formatDateTimeDMY } from "./i18n.js";
 import { S } from "./app.js";
 import { fuelLevelLabel, fuelLevelColorClass } from "./vehicles.js";
 import { detailButton, isAdminViewer } from "./entry-details.js";
+import { COST_TYPES, COST_META } from "./entries-view.js";
 import { rememberEntry, rememberAssignment, rememberTrip } from "./detail-registry.js";
 
 // ── GLAVNI RENDER ─────────────────────────────────────────────
@@ -226,7 +227,7 @@ export function summarizeAssignments(assignments, tripsByAssignment, entriesByAs
       if (e.type === "fuel") {
         sum.fuelL    += Number(e.fuelAmount) || 0;
         sum.fuelCost += Number(e.fuelCost)   || 0;
-      } else if (["toll", "parking", "washing", "other_cost"].includes(e.type)) {
+      } else if (COST_TYPES.includes(e.type)) {
         sum.otherCost += Number(e.amount) || 0;
       } else if (["fault", "damage", "accident"].includes(e.type)) {
         sum.incidents++;
@@ -324,7 +325,7 @@ export function historyAssignmentCard(a, tripsByAssignment, entriesByTrip, entri
   const totalFuelL    = fuelEntries.reduce((s, e) => s + (e.fuelAmount || 0), 0);
   const totalFuelCost = fuelEntries.reduce((s, e) => s + (e.fuelCost || 0), 0);
   const totalOtherCost = assignmentEntries
-    .filter(e => ["toll", "parking", "washing", "other_cost"].includes(e.type))
+    .filter(e => COST_TYPES.includes(e.type))
     .reduce((s, e) => s + (e.amount || 0), 0);
   const incidentCount = assignmentEntries.filter(e => ["fault", "damage", "accident"].includes(e.type)).length;
 
@@ -393,7 +394,7 @@ function tripHistoryCard(trip, entries, index, assignmentId = null) {
   const km = (trip.endKm != null && trip.startKm != null) ? (trip.endKm - trip.startKm) : null;
 
   const fuelEntries = entries.filter(e => e.type === "fuel");
-  const costEntries  = entries.filter(e => ["toll", "parking", "washing", "other_cost"].includes(e.type));
+  const costEntries  = entries.filter(e => COST_TYPES.includes(e.type));
   const incEntries   = entries.filter(e => ["fault", "damage", "accident", "other"].includes(e.type));
 
   const badges = [
@@ -460,9 +461,9 @@ export function historyEntryItem(entry) {
       </div>
     `;
   }
-  if (["toll", "parking", "washing", "other_cost"].includes(entry.type)) {
-    const costIcons  = { toll: "🛣️", parking: "🅿️", washing: "🚿", other_cost: "📋" };
-    const costLabels = { toll: t("trip_entry_toll"), parking: t("trip_entry_parking"), washing: t("trip_entry_washing"), other_cost: t("trip_entry_cost") };
+  if (COST_TYPES.includes(entry.type)) {
+    const costIcons  = Object.fromEntries(COST_TYPES.map(k => [k, COST_META[k].icon]));
+    const costLabels = Object.fromEntries(COST_TYPES.map(k => [k, t(COST_META[k].label)]));
     return `
       <div class="trip-history-entry${clk}">
         <span>${costIcons[entry.type] || "📋"} ${costLabels[entry.type] || entry.type}</span>
@@ -528,6 +529,8 @@ export function tripEntryCard(entry, { clickable = false } = {}) {
     toll:       { icon: "🛣️", label: t("trip_entry_toll"),   color: "inactive" },
     parking:    { icon: "🅿️", label: t("trip_entry_parking"), color: "inactive" },
     washing:    { icon: "🚿", label: t("trip_entry_washing"), color: "inactive" },
+    cosmetics:  { icon: "🧴", label: t("trip_entry_cosmetics"), color: "inactive" },
+    adblue:     { icon: "💧", label: t("trip_entry_adblue"), color: "inactive" },
     other_cost: { icon: "📋", label: t("trip_entry_cost"),   color: "inactive" },
     fault:      { icon: "🔧", label: t("incident_fault"),   color: "service" },
     damage:     { icon: "💥", label: t("incident_damage"),  color: "broken" },
@@ -559,7 +562,7 @@ export function tripEntryCard(entry, { clickable = false } = {}) {
             ${entry.receiptNo ? ` · ${t("trip_fuel_receipt")}: ${entry.receiptNo}` : ""}
             ${entry.currentKm ? ` · ${entry.currentKm.toLocaleString()} km` : ""}
           </div>
-        ` : entry.type === "toll" || entry.type === "parking" || entry.type === "washing" || entry.type === "other_cost" ? `
+        ` : COST_TYPES.includes(entry.type) ? `
           <div class="trip-entry-card__main">
             <strong>${entry.amount?.toLocaleString()} RSD</strong>
           </div>

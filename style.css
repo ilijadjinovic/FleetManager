@@ -1380,6 +1380,34 @@ tbody td {
 .company-admin-contact { color: var(--color-text-muted); }
 .company-admin-item__actions { display: flex; gap: 4px; margin-left: auto; }
 
+/* Firme — kartica koja se širi na klik */
+.company-card__toggle { cursor: pointer; align-items: center; user-select: none; }
+.company-card__toggle:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 4px;
+  border-radius: var(--radius-sm);
+}
+.company-card__summary {
+  display: flex; align-items: center; gap: 12px; flex-shrink: 0;
+  font-size: 13px; color: var(--color-text-muted);
+}
+.company-card__chevron {
+  display: inline-block;
+  color: var(--color-text-faint);
+  font-size: 14px;
+  transition: transform 0.15s;
+}
+.company-card--open .company-card__chevron { transform: rotate(180deg); }
+.company-card__body {
+  display: flex; flex-direction: column; gap: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+.company-card:not(.company-card--open) .company-card__body { display: none; }
+.company-card__toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
+.company-card__section { display: flex; flex-direction: column; gap: 8px; }
+.company-card .detail-row__label { min-width: 130px; }
+
 /* ── SERVICERI (servicer-card) ──────────────────────────────
    Napomena: ove klase koristi servicers.js, ali do sada nisu
    bile definisane ovde — zato su se serviseri prikazivali kao

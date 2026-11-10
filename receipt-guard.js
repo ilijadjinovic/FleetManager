@@ -5,7 +5,8 @@
 //  Tri sloja:
 //   1) Normalizacija broja računa (razmaci, mala slova, razne crtice),
 //      da isti račun ne prođe samo zato što je drugačije ukucan.
-//   2) Provera u bazi PRE snimanja (poruka sa detaljima prvog unosa).
+//   2) Provera u bazi PRE snimanja (poruka sa detaljima prvog unosa);
+//      proverava se i kolekcija servisa, ne samo troškovi/gorivo.
 //   3) Snimanje u transakciji pod determinističkim ID-jem dokumenta
 //      ("r_" + normalizovan broj računa). Dva istovremena unosa istog
 //      računa (dva vozača, dupli klik) ne mogu oba da uspeju — drugi
@@ -44,7 +45,7 @@ export function receiptKey(normalized) {
   return normalized ? encodeURIComponent(normalized) : null;
 }
 
-const EXPENSE_TYPES = ["fuel", "toll", "parking", "washing", "other_cost"];
+const EXPENSE_TYPES = ["fuel", "toll", "parking", "washing", "cosmetics", "adblue", "other_cost"];
 
 // Vraća postojeći unos sa istim brojem računa, ili null.
 // Baca grešku ako provera ne uspe — pozivalac NE sme tada da snimi.
@@ -58,6 +59,14 @@ export async function findReceiptDuplicate(companyId, receiptNo, { ignoreId = nu
     const snap = await getDocs(query(col, where("receiptNo", "==", v)));
     const hit = snap.docs.find(d => d.id !== ignoreId && EXPENSE_TYPES.includes(d.data().type));
     if (hit) return { id: hit.id, ...hit.data() };
+  }
+
+  // Račun može biti unet i kroz servis (forma "Dodaj servis" / "Servis završen")
+  const svcCol = collection(db, "companies", companyId, "services");
+  for (const v of variants) {
+    const snap = await getDocs(query(svcCol, where("receiptNo", "==", v)));
+    const hit = snap.docs.find(d => d.id !== ignoreId);
+    if (hit) return { id: hit.id, ...hit.data(), _source: "service" };
   }
   return null;
 }
